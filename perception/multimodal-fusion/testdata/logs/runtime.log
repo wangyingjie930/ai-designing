@@ -1,0 +1,4 @@
+2026-06-15T10:00:01Z INFO request_id=req-001 prepare_report_context started
+2026-06-15T10:00:02Z WARN request_id=req-001 fake_pdf_extract real PDF parsing disabled
+2026-06-15T10:00:03Z ERROR request_id=req-002 table rows missing source_page
+2026-06-15T10:00:04Z INFO request_id=req-003 image_ref retained for market trend chart
