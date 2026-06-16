@@ -3,63 +3,42 @@ package main
 import (
 	"bufio"
 	"context"
-	"encoding/json"
-	"flag"
 	"fmt"
 	"os"
 	"strings"
+	"testing"
 
 	"github.com/cloudwego/eino-ext/components/model/openai"
 
+	"ai-designing/cmd/internal/e2etest"
+	localmem0 "ai-designing/memory/mem0"
 	cozeloopobs "ai-designing/observability/cozeloop"
-	"ai-designing/perception/triage"
 )
 
-// main 提供可 prepare-only 验证、也可用 .env API key 实跑的上下文分诊客服 Agent。
-func main() {
-	var envPath string
-	var message string
-	var tenantID string
-	var userID string
-	var sessionID string
-	var ticketID string
-	var productLine string
-	var plan string
-	var budget int
-	var prepareOnly bool
-	var printContext bool
+// TestMem0AgentDemoEndToEnd 用固定记忆样例跑通 LLM、Eino ADK、SQLite 写入和 search 召回链路。
+func TestMem0AgentDemoEndToEnd(t *testing.T) {
+	const (
+		envPath     = ".env"
+		dbPath      = "memory/mem0/mem0.sqlite"
+		message     = "你知道我不喜欢吃什么吗"
+		userID      = "mem0-demo-user"
+		agentID     = "mem0-demo-agent"
+		runID       = "mem0-demo-run"
+		printSearch = true
+	)
 
-	flag.StringVar(&envPath, "env", ".env", "Env file path.")
-	flag.StringVar(&message, "message", "", "Current customer message.")
-	flag.StringVar(&tenantID, "tenant", "acme", "Tenant id.")
-	flag.StringVar(&userID, "user", "u-finance-admin", "User id.")
-	flag.StringVar(&sessionID, "session", "sess-20260613-acme-001", "Support session id.")
-	flag.StringVar(&ticketID, "ticket", "T-BILLING-1024", "Support ticket id.")
-	flag.StringVar(&productLine, "product-line", "customer-success-suite", "Product line.")
-	flag.StringVar(&plan, "plan", "enterprise", "Tenant subscription plan.")
-	flag.IntVar(&budget, "budget", 1200, "Context triage token budget for demo.")
-	flag.BoolVar(&prepareOnly, "prepare-only", false, "Only run deterministic triage and print JSON; no model call.")
-	flag.BoolVar(&printContext, "print-context", false, "Print prepared triage context before the final agent answer.")
-	flag.Parse()
-
-	if err := loadDotEnv(envPath); err != nil {
-		exitf("load env: %v", err)
+	if err := loadDotEnv(e2etest.ResolvePath(envPath)); err != nil {
+		t.Fatalf("load env: %v", err)
+	}
+	modelConfig, err := loadModelConfig()
+	if err != nil {
+		t.Fatalf("load model config: %v", err)
 	}
 
 	ctx := context.Background()
-	runtime := triage.RuntimeContext{
-		TenantID:    tenantID,
-		UserID:      userID,
-		SessionID:   sessionID,
-		TicketID:    ticketID,
-		ProductLine: productLine,
-		Plan:        plan,
-	}
-	request, docs := triage.DemoScenario(runtime, message, budget)
-
 	cozeLoopConfig, shutdownCozeLoop, err := cozeloopobs.InstallFromEnv(ctx)
 	if err != nil {
-		exitf("init cozeloop: %v", err)
+		t.Fatalf("init cozeloop: %v", err)
 	}
 	defer func() {
 		if err := shutdownCozeLoop(context.Background()); err != nil {
@@ -67,38 +46,84 @@ func main() {
 		}
 	}()
 
-	modelConfig, err := loadModelConfig()
-	if err != nil {
-		exitf("load model config: %v", err)
-	}
 	chatModel, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
 		APIKey:  modelConfig.APIKey,
 		Model:   modelConfig.Model,
 		BaseURL: modelConfig.BaseURL,
 	})
 	if err != nil {
-		exitf("init chat model: %v", err)
+		t.Fatalf("init chat model: %v", err)
 	}
-	agent, err := triage.NewSaaSTriageAgent(ctx, chatModel, triage.AgentConfig{
-		TriageConfig:  triage.TriageConfig{Budget: budget},
-		ResourceStore: triage.NewInMemoryResourceStore(docs...),
+	resolvedDBPath := e2etest.ResolvePath(dbPath)
+	memory, err := localmem0.NewMemory(ctx, localmem0.Config{
+		DBPath:   resolvedDBPath,
+		Model:    chatModel,
+		Embedder: localmem0.NewFakeEmbedder(64),
+	})
+	if err != nil {
+		t.Fatalf("init mem0 memory: %v", err)
+	}
+	defer memory.Close()
+
+	agent, err := localmem0.NewAgent(ctx, localmem0.AgentConfig{
+		Model:         chatModel,
+		Memory:        memory,
 		MaxIterations: 8,
 	})
 	if err != nil {
-		exitf("init triage agent: %v", err)
+		t.Fatalf("init mem0 agent: %v", err)
 	}
 
 	fmt.Printf("model=%s\nbase_url=%s\napi_key=%s\n", modelConfig.Model, displayBaseURL(modelConfig.BaseURL), redactKey(modelConfig.APIKey))
 	fmt.Printf("cozeloop=%s endpoint=%s workspace=%s\n", enabledText(cozeLoopConfig.Enabled), cozeloopobs.DisplayEndpoint(cozeLoopConfig), cozeloopobs.DisplayWorkspaceID(cozeLoopConfig))
-	fmt.Printf("tenant=%s user=%s session=%s ticket=%s budget=%d\n\n", request.Runtime.TenantID, request.Runtime.UserID, request.Runtime.SessionID, request.Runtime.TicketID, budget)
-	answer, err := triage.RunSaaSTriageWithAgent(ctx, agent, request)
+	fmt.Printf("sqlite=%s\nuser=%s agent=%s run=%s\n\n", resolvedDBPath, userID, agentID, runID)
+
+	resp, err := agent.Query(ctx, localmem0.AgentRequest{
+		UserID:  userID,
+		AgentID: agentID,
+		RunID:   runID,
+		Message: message,
+	})
 	if err != nil {
-		exitf("run triage agent: %v", err)
+		t.Fatalf("run mem0 agent: %v", err)
 	}
 	fmt.Println("=== Agent Response ===")
-	fmt.Println(answer)
+	fmt.Println(resp.Message)
+
+	if printSearch {
+		printPersistedSearch(ctx, memory, message, userID, agentID, runID)
+	}
 }
 
+// printPersistedSearch 在 Agent 跑完后直接查询 SQLite，确认工具写入可以被 search 召回。
+func printPersistedSearch(ctx context.Context, memory *localmem0.Memory, message, userID, agentID, runID string) {
+	threshold := 0.0
+	search, err := memory.Search(ctx, localmem0.SearchRequest{
+		Query: message,
+		Filters: map[string]any{
+			"user_id":  userID,
+			"agent_id": agentID,
+			"run_id":   runID,
+		},
+		TopK:      5,
+		Threshold: &threshold,
+		Explain:   true,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warn: search persisted memory: %v\n", err)
+		return
+	}
+	fmt.Println("\n=== Persisted Memory Search ===")
+	if len(search.Results) == 0 {
+		fmt.Println("no persisted memories matched")
+		return
+	}
+	for idx, item := range search.Results {
+		fmt.Printf("%d. score=%.3f id=%s memory=%s\n", idx+1, item.Score, item.ID, item.Memory)
+	}
+}
+
+// modelConfig 保存 demo 运行所需的 OpenAI-compatible 模型连接信息。
 type modelConfig struct {
 	APIKey  string
 	Model   string
@@ -197,19 +222,4 @@ func redactKey(key string) string {
 		return "***"
 	}
 	return key[:4] + "..." + key[len(key)-4:]
-}
-
-// printJSON 用稳定格式输出 prepare-only 的结构化 trace。
-func printJSON(value any) {
-	encoder := json.NewEncoder(os.Stdout)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(value); err != nil {
-		exitf("encode json: %v", err)
-	}
-}
-
-// exitf 输出命令行错误并返回非零退出码。
-func exitf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "error: "+format+"\n", args...)
-	os.Exit(1)
 }

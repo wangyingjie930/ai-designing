@@ -3,53 +3,48 @@ package main
 import (
 	"bufio"
 	"context"
-	"flag"
 	"fmt"
 	"os"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/cloudwego/eino-ext/components/model/openai"
 
+	"ai-designing/cmd/internal/e2etest"
 	cozeloopobs "ai-designing/observability/cozeloop"
 	"ai-designing/perception/compaction"
 )
 
-// main 提供一个可用 API key 直接跑通的长会话客服 Agent demo。
-func main() {
-	var envPath string
-	var message string
-	var ticketID string
-	var customerID string
-	var productLine string
-	var severity string
-	var slaMinutes int
-	var noSeed bool
-	var printPrompt bool
+// TestSupportAgentDemoEndToEnd 用固定 P1 支付工单跑通长会话压缩和客服回复的真实 Agent 链路。
+func TestSupportAgentDemoEndToEnd(t *testing.T) {
+	if !e2etest.Enabled() {
+		t.Skipf("跳过 cmd 端到端测试；设置 %s=1 后会使用 .env 真实调用模型", e2etest.EnvName)
+	}
 
-	flag.StringVar(&envPath, "env", ".env", "Env file path.")
-	flag.StringVar(&message, "message", "现在进展如何？下一步应该怎么处理？", "User message for the support agent.")
-	flag.StringVar(&ticketID, "ticket", "T-PAY-10086", "Support ticket id.")
-	flag.StringVar(&customerID, "customer", "CUST-42", "Customer id.")
-	flag.StringVar(&productLine, "product-line", "payment", "Product line.")
-	flag.StringVar(&severity, "severity", "P1", "Ticket severity, for example P1/P2/P3.")
-	flag.IntVar(&slaMinutes, "sla-minutes", 20, "Minutes until SLA deadline.")
-	flag.BoolVar(&noSeed, "no-seed", false, "Skip built-in long-session seed history.")
-	flag.BoolVar(&printPrompt, "print-prompt", false, "Print prompt view after token-limit middleware.")
-	flag.Parse()
+	const (
+		envPath     = ".env"
+		message     = "现在进展如何？下一步应该怎么处理？"
+		ticketID    = "T-PAY-10086"
+		customerID  = "CUST-42"
+		productLine = "payment"
+		severity    = "P1"
+		slaMinutes  = 20
+		printPrompt = false
+	)
 
-	if err := loadDotEnv(envPath); err != nil {
-		exitf("load env: %v", err)
+	if err := loadDotEnv(e2etest.ResolvePath(envPath)); err != nil {
+		t.Fatalf("load env: %v", err)
 	}
 	modelConfig, err := loadModelConfig()
 	if err != nil {
-		exitf("load model config: %v", err)
+		t.Fatalf("load model config: %v", err)
 	}
 
 	ctx := context.Background()
 	cozeLoopConfig, shutdownCozeLoop, err := cozeloopobs.InstallFromEnv(ctx)
 	if err != nil {
-		exitf("init cozeloop: %v", err)
+		t.Fatalf("init cozeloop: %v", err)
 	}
 	defer func() {
 		if err := shutdownCozeLoop(context.Background()); err != nil {
@@ -63,7 +58,7 @@ func main() {
 		BaseURL: modelConfig.BaseURL,
 	})
 	if err != nil {
-		exitf("init chat model: %v", err)
+		t.Fatalf("init chat model: %v", err)
 	}
 
 	supportContext := compaction.SupportContext{
@@ -89,11 +84,9 @@ func main() {
 		MaxIterations: 4,
 	})
 	if err != nil {
-		exitf("init support agent: %v", err)
+		t.Fatalf("init support agent: %v", err)
 	}
-	if !noSeed {
-		seedLongSupportSession(agent, supportContext)
-	}
+	seedLongSupportSession(agent, supportContext)
 
 	fmt.Printf("model=%s\nbase_url=%s\napi_key=%s\n", modelConfig.Model, displayBaseURL(modelConfig.BaseURL), redactKey(modelConfig.APIKey))
 	fmt.Printf("cozeloop=%s endpoint=%s workspace=%s\n", enabledText(cozeLoopConfig.Enabled), cozeloopobs.DisplayEndpoint(cozeLoopConfig), cozeloopobs.DisplayWorkspaceID(cozeLoopConfig))
@@ -104,7 +97,7 @@ func main() {
 		Message: message,
 	})
 	if err != nil {
-		exitf("run support agent: %v", err)
+		t.Fatalf("run support agent: %v", err)
 	}
 
 	printCompactionEvent(response.PromptView.TokenPressure, response.CompactionEvent)
@@ -268,10 +261,4 @@ func redactKey(key string) string {
 		return "***"
 	}
 	return key[:4] + "..." + key[len(key)-4:]
-}
-
-// exitf 输出命令行错误并返回非零退出码。
-func exitf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "error: "+format+"\n", args...)
-	os.Exit(1)
 }

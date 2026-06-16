@@ -36,20 +36,20 @@ COZELOOP_API_TOKEN=your_token
 命令行运行：
 
 ```bash
-env GOCACHE=/private/tmp/ai-designing-gocache go run ./cmd/support-agent-demo -env .env -message '现在进展如何？下一步应该怎么处理？' -print-prompt
+env CMD_E2E=1 GOCACHE=/private/tmp/ai-designing-gocache go test ./cmd/support-agent-demo -run TestSupportAgentDemoEndToEnd -count=1 -v
 ```
 
 如果 `.env` 中没有配置扣子罗盘 workspace/token，demo 会保持 no-op，只打印 `cozeloop=disabled`：
 
 ```bash
-env GOCACHE=/private/tmp/ai-designing-gocache go run ./cmd/support-agent-demo -env .env -message '现在进展如何？下一步应该怎么处理？'
+env CMD_E2E=1 GOCACHE=/private/tmp/ai-designing-gocache go test ./cmd/support-agent-demo -run TestSupportAgentDemoEndToEnd -count=1 -v
 ```
 
 GoLand 运行：
 
 - 打开 Run Configurations。
-- 选择 `Support Agent Demo`。
-- 直接 Run，配置会自动从项目根目录 `.env` 读取 API key。
+- 新建或选择 Go Test 配置，测试函数指向 `TestSupportAgentDemoEndToEnd`。
+- 环境变量设置 `CMD_E2E=1`，配置会自动从项目根目录 `.env` 读取 API key。
 
 这个 demo 会注入一段长客服历史，稳定触发 compaction，并打印：
 
@@ -57,7 +57,6 @@ GoLand 运行：
 - `CompactionEvent`
 - `HandoffSummary`
 - Agent 最终回复
-- `-print-prompt` 打开时经过 token-limit middleware 后的 prompt view
 
 实现上 demo 只初始化一个 OpenAI-compatible ChatModel。压缩触发和 Anchor 更新由 `perception/compaction` 内部的 token-limit middleware 与 compactor 负责，避免把压缩实现细节泄漏到 `cmd` 层。
 

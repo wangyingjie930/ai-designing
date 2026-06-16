@@ -3,76 +3,43 @@ package main
 import (
 	"bufio"
 	"context"
-	"flag"
 	"fmt"
 	"os"
 	"strings"
+	"testing"
 
 	"github.com/cloudwego/eino-ext/components/model/openai"
 
+	"ai-designing/cmd/internal/e2etest"
 	cozeloopobs "ai-designing/observability/cozeloop"
 	multimodalfusion "ai-designing/perception/multimodal-fusion"
 )
 
-type repeatedFlag []string
+// TestReportAgentEndToEnd 用固定 fake PDF 研报样例跑通解析、融合、ADK 工具回填和模型总结链路。
+func TestReportAgentEndToEnd(t *testing.T) {
+	const (
+		envPath      = ".env"
+		task         = "输出核心摘要、数字事实核查、行动要点和风险缺口"
+		reportType   = "report"
+		industry     = ""
+		audience     = ""
+		goal         = ""
+		includeTrace = true
+	)
+	files := e2etest.ResolvePaths([]string{"perception/multimodal-fusion/testdata/reports/fake-market-report.pdf"})
+	kinds := []string{"pdf"}
+	hints := []string{"fake测试"}
+	imageProcessing := []string{}
 
-// String implements flag.Value for repeated string flags.
-func (r *repeatedFlag) String() string {
-	return strings.Join(*r, ",")
-}
-
-// Set implements flag.Value for repeated string flags.
-func (r *repeatedFlag) Set(value string) error {
-	*r = append(*r, value)
-	return nil
-}
-
-func main() {
-	var files repeatedFlag
-	var kinds repeatedFlag
-	var hints repeatedFlag
-	var imageProcessing repeatedFlag
-	var task string
-	var reportType string
-	var industry string
-	var audience string
-	var goal string
-	var includeTrace bool
-	var envPath string
-	var printConfig bool
-
-	flag.Var(&files, "file", "File path to analyze. Can be repeated.")
-	flag.Var(&kinds, "kind", "Optional modality for the matching -file: text, table, log, pdf, image, audio, sql_result. Can be repeated.")
-	flag.Var(&hints, "hint", "Optional business hint for the matching -file. Can be repeated.")
-	flag.Var(&imageProcessing, "image-processing", "Optional image handling mode for the matching -file: auto, vision, or ocr. Can be repeated.")
-	flag.StringVar(&task, "task", "输出核心摘要、数字事实核查、行动要点和风险缺口", "Analysis task.")
-	flag.StringVar(&reportType, "report-type", "report", "Report type, for example industry, company, contract, audit, operations.")
-	flag.StringVar(&industry, "industry", "", "Industry or domain.")
-	flag.StringVar(&audience, "audience", "", "Target audience.")
-	flag.StringVar(&goal, "goal", "", "Business goal.")
-	flag.BoolVar(&includeTrace, "trace", true, "Include fusion trace in the tool context.")
-	flag.StringVar(&envPath, "env", ".env", "Env file path.")
-	flag.BoolVar(&printConfig, "print-config", false, "Print effective model config and exit.")
-	flag.Parse()
-
-	if err := loadDotEnv(envPath); err != nil {
-		exitf("load env: %v", err)
+	if err := loadDotEnv(e2etest.ResolvePath(envPath)); err != nil {
+		t.Fatalf("load env: %v", err)
 	}
-	if len(files) == 0 {
-		exitf("missing -file. Example: go run ./cmd/report-agent -file ./report.pdf -hint 行业研报")
-	}
-
 	ctx := context.Background()
 	modelConfig, err := loadModelConfig()
 	if err != nil {
-		exitf("load model config: %v", err)
+		t.Fatalf("load model config: %v", err)
 	}
-	cozeLoopConfig := cozeloopobs.ConfigFromEnv()
-	if printConfig {
-		fmt.Printf("model=%s\nbase_url=%s\napi_key=%s\n", modelConfig.Model, modelConfig.BaseURL, redactKey(modelConfig.APIKey))
-		fmt.Printf("cozeloop=%s endpoint=%s workspace=%s\n", enabledText(cozeLoopConfig.Enabled), cozeloopobs.DisplayEndpoint(cozeLoopConfig), cozeloopobs.DisplayWorkspaceID(cozeLoopConfig))
-		return
-	}
+	fmt.Printf("model=%s\nbase_url=%s\napi_key=%s\n", modelConfig.Model, modelConfig.BaseURL, redactKey(modelConfig.APIKey))
 
 	request := multimodalfusion.ReportAnalysisRequest{
 		Files:        buildFileInputs(files, kinds, hints, imageProcessing),
@@ -88,7 +55,7 @@ func main() {
 
 	cozeLoopConfig, shutdownCozeLoop, err := cozeloopobs.InstallFromEnv(ctx)
 	if err != nil {
-		exitf("init cozeloop: %v", err)
+		t.Fatalf("init cozeloop: %v", err)
 	}
 	defer func() {
 		if err := shutdownCozeLoop(context.Background()); err != nil {
@@ -99,17 +66,17 @@ func main() {
 
 	chatModel, err := newOpenAIChatModel(ctx, modelConfig)
 	if err != nil {
-		exitf("init chat model: %v", err)
+		t.Fatalf("init chat model: %v", err)
 	}
 
 	agent, err := multimodalfusion.NewReportAnalysisAgent(ctx, chatModel, multimodalfusion.AgentConfig{})
 	if err != nil {
-		exitf("init report agent: %v", err)
+		t.Fatalf("init report agent: %v", err)
 	}
 
 	result, err := multimodalfusion.AnalyzeWithAgent(ctx, agent, request)
 	if err != nil {
-		exitf("run agent: %v", err)
+		t.Fatalf("run agent: %v", err)
 	}
 
 	fmt.Println(result)
@@ -245,10 +212,4 @@ func redactKey(key string) string {
 		return "***"
 	}
 	return key[:4] + "..." + key[len(key)-4:]
-}
-
-// exitf prints a command-line error and exits non-zero.
-func exitf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "report-agent: "+format+"\n", args...)
-	os.Exit(1)
 }

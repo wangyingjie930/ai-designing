@@ -8,6 +8,8 @@ require (
 	github.com/cloudwego/eino-ext/callbacks/cozeloop v0.3.0
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.8
 	github.com/coze-dev/cozeloop-go v0.1.22
+	github.com/google/uuid v1.6.0
+	github.com/mattn/go-sqlite3 v1.14.45
 )
 
 require (
@@ -26,7 +28,6 @@ require (
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/golang-jwt/jwt v3.2.2+incompatible // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/goph/emperror v0.17.2 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.9 // indirect
