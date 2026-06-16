@@ -58,24 +58,18 @@ func (t *prepareReportContextTool) Info(context.Context) (*schema.ToolInfo, erro
 	return t.info, nil
 }
 
-// InvokableRun 以纯文本工具结果返回融合上下文，避免 OpenAI 请求出现 tool role 的多模态 content。
-func (t *prepareReportContextTool) InvokableRun(ctx context.Context, argument string, _ ...tool.Option) (string, error) {
-	var request ReportAnalysisRequest
-	if strings.TrimSpace(argument) != "" {
-		if err := json.Unmarshal([]byte(argument), &request); err != nil {
-			return "", err
-		}
+// InvokableRun 返回 Eino 原生多模态工具结果，让关键图表直接进入 tool message。
+func (t *prepareReportContextTool) InvokableRun(ctx context.Context, argument *schema.ToolArgument, _ ...tool.Option) (*schema.ToolResult, error) {
+	request, err := parseReportToolArgument(argument)
+	if err != nil {
+		return nil, err
 	}
 
 	prepared, err := t.analyzer.PrepareReportContext(ctx, request)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	payload, err := json.MarshalIndent(prepared, "", "  ")
-	if err != nil {
-		return "", err
-	}
-	return string(payload), nil
+	return buildPreparedReportToolResult(prepared)
 }
 
 // NewReportAnalysisAgent builds an Eino ADK ChatModelAgent for file-based report analysis.
@@ -83,7 +77,6 @@ func NewReportAnalysisAgent(ctx context.Context, chatModel model.BaseChatModel, 
 	if chatModel == nil {
 		return nil, fmt.Errorf("chat model is required")
 	}
-	chatModel = wrapImageAwareChatModel(chatModel)
 
 	analyzer := config.Analyzer
 	if analyzer == nil {
@@ -181,12 +174,24 @@ func defaultReportAgentInstruction() string {
 	return strings.Join([]string{
 		"你是一个文件解析报告分析 Agent。",
 		"面对 PDF、表格、日志、文本和图片 URL/引用时，必须先调用 prepare_report_context 工具，不允许直接把 PDF 路径或图片 URL 当正文分析。",
-		"PDF 必须按多模态融合逻辑拆分：主体抽取 TOC、章节摘要和关键页；关键图表保留为 image_ref；表格转 markdown；logo、页脚、模板图标等装饰图丢弃。",
-		"图片 URL 或关键图表会作为 image_ref 进入最终分析轮；如果图片配置为 image_processing=ocr，则先由 vision 大模型做 OCR，再使用 OCR 文本，不要假装看过原图。",
+		"PDF 必须按多模态融合逻辑拆分：主体抽取 TOC、章节摘要和关键页；关键图表作为工具多模态图片返回，并在 JSON 中保留 image_ref 元数据；表格转 markdown；logo、页脚、模板图标等装饰图丢弃。",
+		"图片 URL 或关键图表会作为工具多模态图片进入最终分析轮；如果图片配置为 image_processing=ocr，则先由 vision 大模型做 OCR，再使用 OCR 文本，不要假装看过原图。",
 		"分析时遵循：文本给逻辑，表格给结构，图表给空间关系，trace 给质量审查。",
 		"输出必须包含：核心论点摘要、数字事实核查、行动或销售要点、风险与缺口。",
 		"数字事实核查必须给出 source/page/chart/table/ref 和 confidence；找不到来源时标为 low，不要编造引用。",
 		"涉及精确计算时优先使用结构化表格或文本数字，图像只用于趋势、空间关系、图例和版式判断。",
 		"如果工具返回 health warning，需要在风险与缺口里解释可能影响。",
 	}, "\n")
+}
+
+// parseReportToolArgument 兼容 EnhancedInvokableTool 的参数包装，内部仍复用原始 JSON 契约。
+func parseReportToolArgument(argument *schema.ToolArgument) (ReportAnalysisRequest, error) {
+	if argument == nil || strings.TrimSpace(argument.Text) == "" {
+		return ReportAnalysisRequest{}, nil
+	}
+	var request ReportAnalysisRequest
+	if err := json.Unmarshal([]byte(argument.Text), &request); err != nil {
+		return ReportAnalysisRequest{}, err
+	}
+	return request, nil
 }

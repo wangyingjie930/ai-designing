@@ -2,7 +2,6 @@ package multimodalfusion
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -34,8 +33,8 @@ func TestNewReportAnalysisAgent(t *testing.T) {
 	}
 }
 
-// TestAnalyzeWithAgentKeepsToolResultTextual 验证 Agent 工具回填不会生成非法的 tool role 多模态消息。
-func TestAnalyzeWithAgentKeepsToolResultTextual(t *testing.T) {
+// TestAnalyzeWithAgentUsesEnhancedToolResult 验证 Agent 工具回填直接携带多模态图片。
+func TestAnalyzeWithAgentUsesEnhancedToolResult(t *testing.T) {
 	model := &toolCallingChatModel{}
 	agent, err := NewReportAnalysisAgent(context.Background(), model, AgentConfig{})
 	if err != nil {
@@ -57,7 +56,7 @@ func TestAnalyzeWithAgentKeepsToolResultTextual(t *testing.T) {
 	}
 }
 
-// TestPrepareReportContextTool 验证报告上下文工具保留 image_ref 引用，但只暴露普通可调用工具接口。
+// TestPrepareReportContextTool 验证报告上下文工具以 EnhancedTool 返回 JSON 文本和图片 part。
 func TestPrepareReportContextTool(t *testing.T) {
 	dir := t.TempDir()
 	imagePath := filepath.Join(dir, "chart.png")
@@ -83,22 +82,30 @@ func TestPrepareReportContextTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPrepareReportContextTool() error = %v", err)
 	}
-	if _, ok := baseTool.(tool.EnhancedInvokableTool); ok {
-		t.Fatalf("tool type = %T, want plain InvokableTool to avoid multimodal tool-role messages", baseTool)
+	if _, ok := baseTool.(tool.InvokableTool); ok {
+		t.Fatalf("tool type = %T, should not use plain InvokableTool", baseTool)
 	}
-	invokable, ok := baseTool.(tool.InvokableTool)
+	enhanced, ok := baseTool.(tool.EnhancedInvokableTool)
 	if !ok {
-		t.Fatalf("tool type = %T, want InvokableTool", baseTool)
+		t.Fatalf("tool type = %T, want EnhancedInvokableTool", baseTool)
 	}
-	out, err := invokable.InvokableRun(context.Background(), `{"files":[{"path":"report.pdf","kind":"pdf","hint":"metrics"}],"include_trace":true}`)
+	result, err := enhanced.InvokableRun(context.Background(), &schema.ToolArgument{Text: `{"files":[{"path":"report.pdf","kind":"pdf","hint":"metrics"}],"include_trace":true}`})
 	if err != nil {
 		t.Fatalf("InvokableRun() error = %v", err)
 	}
-	if !strings.Contains(out, `"type": "image_ref"`) {
-		t.Fatalf("tool output = %s, want image_ref JSON block", out)
+	textPart := firstToolTextPart(result.Parts)
+	if textPart == nil || !strings.Contains(textPart.Text, `"type": "image_ref"`) {
+		t.Fatalf("tool result = %+v, want image_ref JSON text block", result)
 	}
-	if !strings.Contains(out, imagePath) {
-		t.Fatalf("tool output = %s, want image path", out)
+	if !strings.Contains(textPart.Text, imagePath) {
+		t.Fatalf("tool text = %s, want image path", textPart.Text)
+	}
+	imagePart := firstToolImagePart(result.Parts)
+	if imagePart == nil || imagePart.Image == nil || imagePart.Image.Base64Data == nil {
+		t.Fatalf("tool result = %+v, want local image as base64 part", result)
+	}
+	if imagePart.Image.MIMEType != "image/png" {
+		t.Fatalf("image mime = %s, want image/png", imagePart.Image.MIMEType)
 	}
 }
 
@@ -107,7 +114,7 @@ type toolCallingChatModel struct {
 	calls int
 }
 
-// Generate 第一轮返回工具调用，第二轮断言工具结果是纯文本 tool message。
+// Generate 第一轮返回工具调用，第二轮断言工具结果直接携带多模态内容。
 func (m *toolCallingChatModel) Generate(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.Message, error) {
 	m.calls++
 	switch m.calls {
@@ -125,17 +132,17 @@ func (m *toolCallingChatModel) Generate(_ context.Context, input []*schema.Messa
 		if toolMsg == nil {
 			return nil, errors.New("missing tool message")
 		}
-		if strings.TrimSpace(toolMsg.Content) == "" {
-			return nil, errors.New("tool message content is empty")
+		if strings.TrimSpace(toolMsg.Content) != "" {
+			return nil, errors.New("enhanced tool message should not use plain content")
 		}
-		if len(toolMsg.UserInputMultiContent) > 0 {
-			return nil, errors.New("tool message unexpectedly carries UserInputMultiContent")
+		if len(toolMsg.UserInputMultiContent) == 0 {
+			return nil, errors.New("tool message missing UserInputMultiContent")
 		}
-		if !strings.Contains(toolMsg.Content, `"type": "image_ref"`) {
+		if !strings.Contains(joinInputTextParts(toolMsg.UserInputMultiContent), `"type": "image_ref"`) {
 			return nil, errors.New("tool message content missing image_ref JSON")
 		}
-		if firstUserMessageWithImage(input) == nil {
-			return nil, errors.New("missing vision bridge user message")
+		if firstImagePart(toolMsg.UserInputMultiContent) == nil {
+			return nil, errors.New("tool message missing image part")
 		}
 		return schema.AssistantMessage("final report", nil), nil
 	default:
@@ -148,7 +155,7 @@ func (m *toolCallingChatModel) Stream(context.Context, []*schema.Message, ...mod
 	return nil, errors.New("stream not implemented")
 }
 
-// captureChatModel 记录底层模型收到的消息，用于验证图片桥接是否生效。
+// captureChatModel 记录底层模型收到的消息，用于验证图片输入是否生效。
 type captureChatModel struct {
 	inputs [][]*schema.Message
 }
@@ -184,17 +191,17 @@ func TestModelImageTextExtractorUsesVisionModel(t *testing.T) {
 	if len(base.inputs) != 1 {
 		t.Fatalf("inputs len = %d, want 1", len(base.inputs))
 	}
-	bridge := firstUserMessageWithImage(base.inputs[0])
-	if bridge == nil {
+	imageMsg := firstUserMessageWithImage(base.inputs[0])
+	if imageMsg == nil {
 		t.Fatal("missing image input for model OCR")
 	}
-	if !strings.Contains(bridge.UserInputMultiContent[0].Text, "只返回图片中可见") {
-		t.Fatalf("OCR prompt = %s", bridge.UserInputMultiContent[0].Text)
+	if !strings.Contains(imageMsg.UserInputMultiContent[0].Text, "只返回图片中可见") {
+		t.Fatalf("OCR prompt = %s", imageMsg.UserInputMultiContent[0].Text)
 	}
 }
 
-// TestImageAwareChatModelAddsRemoteImageURLParts 验证 image_ref URL 会被转成模型可见的图片输入。
-func TestImageAwareChatModelAddsRemoteImageURLParts(t *testing.T) {
+// TestBuildPreparedReportToolResultAddsRemoteImageURLParts 验证远程 image_ref 会直接成为工具图片 part。
+func TestBuildPreparedReportToolResultAddsRemoteImageURLParts(t *testing.T) {
 	prepared := PreparedReportContext{
 		Content: []FusionBlock{{
 			Type:     "image_ref",
@@ -205,28 +212,12 @@ func TestImageAwareChatModelAddsRemoteImageURLParts(t *testing.T) {
 			Hint:     "市场趋势图",
 		}},
 	}
-	payload, err := json.Marshal(prepared)
-	if err != nil {
-		t.Fatal(err)
-	}
 
-	base := &captureChatModel{}
-	wrapped := wrapImageAwareChatModel(base)
-	if _, err := wrapped.Generate(context.Background(), []*schema.Message{{
-		Role:     schema.Tool,
-		ToolName: ReportContextToolName,
-		Content:  string(payload),
-	}}); err != nil {
-		t.Fatalf("Generate() error = %v", err)
+	result, err := buildPreparedReportToolResult(&prepared)
+	if err != nil {
+		t.Fatalf("buildPreparedReportToolResult() error = %v", err)
 	}
-	if len(base.inputs) != 1 {
-		t.Fatalf("inputs len = %d, want 1", len(base.inputs))
-	}
-	bridge := firstUserMessageWithImage(base.inputs[0])
-	if bridge == nil {
-		t.Fatal("missing user multimodal bridge message")
-	}
-	imagePart := firstImagePart(bridge.UserInputMultiContent)
+	imagePart := firstToolImagePart(result.Parts)
 	if imagePart == nil || imagePart.Image == nil || imagePart.Image.URL == nil {
 		t.Fatalf("image part = %+v, want URL image", imagePart)
 	}
@@ -245,7 +236,7 @@ func firstMessageByRole(messages []*schema.Message, role schema.RoleType) *schem
 	return nil
 }
 
-// firstUserMessageWithImage 找到图片桥接生成的 user 多模态消息。
+// firstUserMessageWithImage 找到包含图片的 user 多模态消息。
 func firstUserMessageWithImage(messages []*schema.Message) *schema.Message {
 	for _, message := range messages {
 		if message == nil || message.Role != schema.User {
@@ -258,10 +249,41 @@ func firstUserMessageWithImage(messages []*schema.Message) *schema.Message {
 	return nil
 }
 
+// joinInputTextParts 拼接多模态输入里的文本块，方便测试检查工具 JSON。
+func joinInputTextParts(parts []schema.MessageInputPart) string {
+	texts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part.Type == schema.ChatMessagePartTypeText && strings.TrimSpace(part.Text) != "" {
+			texts = append(texts, part.Text)
+		}
+	}
+	return strings.Join(texts, "\n")
+}
+
 // firstImagePart 返回第一段图片输入，方便测试断言 URL/base64 是否存在。
 func firstImagePart(parts []schema.MessageInputPart) *schema.MessageInputPart {
 	for i := range parts {
 		if parts[i].Type == schema.ChatMessagePartTypeImageURL && parts[i].Image != nil {
+			return &parts[i]
+		}
+	}
+	return nil
+}
+
+// firstToolTextPart 返回工具结果里的第一段文本输出。
+func firstToolTextPart(parts []schema.ToolOutputPart) *schema.ToolOutputPart {
+	for i := range parts {
+		if parts[i].Type == schema.ToolPartTypeText {
+			return &parts[i]
+		}
+	}
+	return nil
+}
+
+// firstToolImagePart 返回工具结果里的第一段图片输出。
+func firstToolImagePart(parts []schema.ToolOutputPart) *schema.ToolOutputPart {
+	for i := range parts {
+		if parts[i].Type == schema.ToolPartTypeImage && parts[i].Image != nil {
 			return &parts[i]
 		}
 	}
