@@ -79,15 +79,15 @@ func NewRetrieveMemoryTool(memory *HierarchicalMemory) (tool.BaseTool, error) {
 	)
 }
 
-// NewContextMemoryTool 创建“查看当前 working/session 上下文”的 ADK 工具。
+// NewContextMemoryTool 创建“查看当前 working 上下文”的 ADK 工具。
 func NewContextMemoryTool(memory *HierarchicalMemory) (tool.BaseTool, error) {
 	if memory == nil {
 		return nil, errors.New("hierarchical memory is required")
 	}
 	toolset := Toolset{Memory: memory}
-	return toolutils.InferTool[ContextRequest, *ContextResponse](
+	return toolutils.InferTool[ContextRequest, *ToolContextResponse](
 		ContextMemoryToolName,
-		"读取当前 working/session memory 快照和 token 预算，用于回答前确认上下文。",
+		"读取当前可见 working memory 快照和 token 预算。session 是内部淘汰缓冲，不会通过工具暴露。",
 		toolset.ContextMemory,
 	)
 }
@@ -121,13 +121,18 @@ func (t Toolset) RetrieveMemory(ctx context.Context, req RetrieveRequest) (*Retr
 	return t.Memory.Retrieve(ctx, req)
 }
 
-// ContextMemory 是 context tool 的执行边界，返回当前短期记忆快照。
-func (t Toolset) ContextMemory(context.Context, ContextRequest) (*ContextResponse, error) {
+// ContextMemory 是 context tool 的执行边界，只返回 LLM 可见的 working 记忆。
+func (t Toolset) ContextMemory(context.Context, ContextRequest) (*ToolContextResponse, error) {
 	if t.Memory == nil {
 		return nil, errors.New("hierarchical memory is required")
 	}
-	context := t.Memory.Context()
-	return &context, nil
+	snapshot := t.Memory.Context()
+	return &ToolContextResponse{
+		Scope:             snapshot.Scope,
+		Working:           snapshot.Working,
+		WorkingTokenCount: snapshot.WorkingTokenCount,
+		WorkingBudget:     snapshot.WorkingBudget,
+	}, nil
 }
 
 // ConsolidateMemory 是 consolidate tool 的执行边界，触发真实 embedding 写入 SQLite。
@@ -200,7 +205,7 @@ func (a *Agent) Query(ctx context.Context, req AgentRequest) (*AgentResponse, er
 	query := strings.Join([]string{
 		"请处理下面这条旅行/家庭行程规划消息。",
 		"你必须自己决定如何调用工具，不要等待外部代码替你喂答案。",
-		"回答前先调用 " + RetrieveMemoryToolName + " 召回相关长期偏好或历史约束，再调用 " + ContextMemoryToolName + " 查看 working/session。",
+		"回答前先调用 " + RetrieveMemoryToolName + " 召回相关长期偏好或历史约束，再调用 " + ContextMemoryToolName + " 查看可见 working memory。",
 		"如果消息中出现稳定偏好、硬约束、预算边界、同行人限制、已确认决策或你的关键反思，调用 " + AddMemoryToolName + " 写入。",
 		"当本轮信息已经足够重要或需要跨会话复用时，调用 " + ConsolidateMemoryToolName + " 持久化。",
 		"",
@@ -264,7 +269,7 @@ func buildHierarchicalTools(memory *HierarchicalMemory, extra []tool.BaseTool) (
 func DefaultTravelPlanningInstruction() string {
 	return strings.Join([]string{
 		"你是一个中文旅行规划助手，目标是把用户零散的偏好、约束和历史决策变成可执行建议。",
-		"每轮先召回长期记忆，再查看 working/session 记忆；只能把工具返回的信息当作历史依据，不要编造不存在的偏好。",
+		"每轮先召回长期记忆，再查看可见 working memory；只能把工具返回的信息当作历史依据，不要编造不存在的偏好。",
 		"需要保存的内容包括：长期偏好、预算和时间硬约束、同行人限制、已确认选择、被否定的方案、跨会话仍有价值的反思。",
 		"不要保存一次性寒暄、明显临时的问题、没有复用价值的普通措辞。",
 		"给建议时要说明依据来自本轮消息还是历史记忆；如果信息不足，列出需要用户补充的最小问题。",

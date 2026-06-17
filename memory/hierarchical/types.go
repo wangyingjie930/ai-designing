@@ -105,11 +105,19 @@ type RetrieveResponse struct {
 // ContextRequest 预留给 ADK tool 的空输入，避免无 schema 工具。
 type ContextRequest struct{}
 
-// ContextResponse 暴露当前 working/session 快照，方便 Agent 在回答前查看短期上下文。
+// ContextResponse 是内部/CLI 调试快照，包含 working 和 session，方便人观察淘汰过程。
 type ContextResponse struct {
 	Scope             string        `json:"scope"`
 	Working           []MemoryEntry `json:"working"`
 	Session           []MemoryEntry `json:"session"`
+	WorkingTokenCount int           `json:"working_token_count"`
+	WorkingBudget     int           `json:"working_budget"`
+}
+
+// ToolContextResponse 是暴露给 LLM 的工具响应，只包含可见 working memory。
+type ToolContextResponse struct {
+	Scope             string        `json:"scope"`
+	Working           []MemoryEntry `json:"working"`
 	WorkingTokenCount int           `json:"working_token_count"`
 	WorkingBudget     int           `json:"working_budget"`
 }

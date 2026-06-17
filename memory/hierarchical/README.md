@@ -10,9 +10,9 @@
 
 ## Agent 场景
 
-非 coding 场景是旅行/家庭行程规划。Agent 会先从 SQLite 召回长期偏好，再查看 working/session，然后根据用户的新消息写入重要约束并按需 consolidation。
+非 coding 场景是旅行/家庭行程规划。Agent 会先从 SQLite 召回长期偏好，再查看可见 working memory，然后根据用户的新消息写入重要约束并按需 consolidation。`session` 是内部淘汰缓冲，CLI 会打印给人看，但不会通过 ADK tool 返回给 LLM。
 
-GoLand 直接点 Run、不带任何参数时，会使用 `output/hierarchical-memory-agent.sqlite` 和 `examples/travel_rounds.txt` 的三轮消息：
+GoLand 直接点 Run、不带任何参数时，会使用 `output/hierarchical-memory-agent.sqlite`、`examples/travel_rounds.txt` 的三轮消息，以及较小的 demo working budget，方便看到 working -> session -> long-term 的迁移：
 
 ```bash
 go run ./cmd/hierarchical-memory-agent

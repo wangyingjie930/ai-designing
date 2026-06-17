@@ -22,6 +22,7 @@ const (
 	defaultEnvPath      = ".env"
 	defaultRoundsPath   = "memory/hierarchical/examples/travel_rounds.txt"
 	defaultDBPath       = "output/hierarchical-memory-agent.sqlite"
+	defaultDemoBudget   = 80
 	dbEnvKey            = "HIERARCHICAL_MEMORY_DB"
 	scopeEnvKey         = "HIERARCHICAL_MEMORY_SCOPE"
 	workingBudgetEnvKey = "HIERARCHICAL_WORKING_BUDGET"
@@ -104,15 +105,22 @@ func runAgent(ctx context.Context, args []string) (runOutput, error) {
 			return runOutput{}, err
 		}
 		printRuntimeConfig(modelConfig{}, embeddingConfig, memory, false)
-		printMemoryContext(memory.Context())
+		if err := printMemorySnapshot(ctx, memory); err != nil {
+			return runOutput{}, err
+		}
 		context := memory.Context()
+		longTerm, err := memory.LongTerm(ctx, 0)
+		if err != nil {
+			return runOutput{}, err
+		}
 		return runOutput{
-			DBPath:  memory.Path(),
-			Scope:   memory.Scope(),
-			Mode:    "prepare-only",
-			Rounds:  0,
-			Working: len(context.Working),
-			Session: len(context.Session),
+			DBPath:   memory.Path(),
+			Scope:    memory.Scope(),
+			Mode:     "prepare-only",
+			Rounds:   0,
+			Working:  len(context.Working),
+			Session:  len(context.Session),
+			LongTerm: len(longTerm),
 		}, nil
 	}
 
@@ -217,6 +225,9 @@ func parseRunConfig(args []string) (runConfig, error) {
 	config.Scope = firstNonEmpty(scope, os.Getenv(scopeEnvKey))
 	if config.WorkingBudget <= 0 {
 		config.WorkingBudget = parsePositiveInt(os.Getenv(workingBudgetEnvKey))
+	}
+	if config.WorkingBudget <= 0 {
+		config.WorkingBudget = defaultDemoBudget
 	}
 	if strings.TrimSpace(message) != "" {
 		config.Messages = append(config.Messages, strings.TrimSpace(message))

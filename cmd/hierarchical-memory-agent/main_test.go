@@ -64,6 +64,9 @@ func TestParseRunConfigDefaults(t *testing.T) {
 	if len(config.Messages) != 3 {
 		t.Fatalf("messages=%d, want default demo rounds", len(config.Messages))
 	}
+	if config.WorkingBudget != defaultDemoBudget {
+		t.Fatalf("working budget=%d, want %d", config.WorkingBudget, defaultDemoBudget)
+	}
 }
 
 // TestRunAgentTraceIsConcise 验证命令根 trace 只记录摘要，不把多轮用户消息塞进上报。
