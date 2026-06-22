@@ -45,3 +45,8 @@ out/
 # Built Visual Studio Code Extensions
 *.vsix
 output
+
+# Local secrets
+.env
+.env.*
+!.env.example
