@@ -23,6 +23,9 @@ const (
 	defaultEnvPath         = ".env"
 	defaultPromptPath      = "reasoning/tot/examples/event_decision_prompt.txt"
 	defaultReasoningMethod = "mcts"
+	defaultMaxDepth        = 1
+	defaultNSim            = 1
+	defaultForestSize      = 1
 )
 
 // runConfig 保存命令行参数，cmd 只负责把外部输入转成 ToT 调用。
@@ -54,6 +57,9 @@ type modelConfig struct {
 type runOutput struct {
 	Mode                  string     `json:"mode"`
 	Method                tot.Method `json:"method"`
+	MaxDepth              int        `json:"max_depth"`
+	NSim                  int        `json:"nsim"`
+	ForestSize            int        `json:"forest_size"`
 	PromptChars           int        `json:"prompt_chars"`
 	AnswerChars           int        `json:"answer_chars"`
 	RootChildren          int        `json:"root_children"`
@@ -108,6 +114,9 @@ func runAgent(ctx context.Context, args []string) (runOutput, error) {
 	output := runOutput{
 		Mode:        "prepare-only",
 		Method:      reasonConfig.Method,
+		MaxDepth:    reasonConfig.MaxDepth,
+		NSim:        reasonConfig.NSim,
+		ForestSize:  reasonConfig.ForestSize,
 		PromptChars: len([]rune(prompt)),
 	}
 	if config.PrepareOnly {
@@ -145,7 +154,7 @@ func runAgent(ctx context.Context, args []string) (runOutput, error) {
 			Root:   core.Root(),
 		}
 	}
-	output = summarizeResponse(prompt, response, usedCustomized)
+	output = summarizeResponse(prompt, response, usedCustomized, reasonConfig)
 	fmt.Printf("model=%s\nbase_url=%s\napi_key=%s\n", modelConfig.Model, displayBaseURL(modelConfig.BaseURL), redactKey(modelConfig.APIKey))
 	fmt.Println("\n=== ToT Final Answer ===")
 	fmt.Println(response.Answer)
@@ -170,10 +179,10 @@ func parseRunConfig(args []string) (runConfig, error) {
 	fs.BoolVar(&config.PrepareOnly, "prepare-only", false, "print prompt without calling model")
 	fs.StringVar(&config.Scope, "scope", "", "optional task scope prepended to internal system prompts")
 	fs.StringVar(&config.Method, "method", "", "tot method: beam_search, dfs, mcts, lats; default mcts")
-	fs.IntVar(&config.MaxDepth, "max-depth", 0, "reasoning max depth")
+	fs.IntVar(&config.MaxDepth, "max-depth", 0, "reasoning max depth; cmd default 1 for fast local validation")
 	fs.IntVar(&config.BeamSize, "beam-size", 0, "beam search size")
-	fs.IntVar(&config.NSim, "nsim", 0, "mcts/lats simulation count")
-	fs.IntVar(&config.ForestSize, "forest-size", 0, "number of independent trees")
+	fs.IntVar(&config.NSim, "nsim", 0, "mcts/lats simulation count; cmd default 1 for fast local validation")
+	fs.IntVar(&config.ForestSize, "forest-size", 0, "number of independent trees; cmd default 1")
 	fs.IntVar(&config.RatingScale, "rating-scale", 0, "grader rating scale")
 	fs.StringVar(&config.AnswerApproach, "answer-approach", "", "pool or best")
 	fs.BoolVar(&config.BatchGrading, "batch-grading", false, "rate sibling options in one grader call")
@@ -187,16 +196,16 @@ func parseRunConfig(args []string) (runConfig, error) {
 	config.Method = firstNonEmpty(config.Method, os.Getenv("TOT_REASONING_METHOD"), defaultReasoningMethod)
 	config.AnswerApproach = firstNonEmpty(config.AnswerApproach, os.Getenv("TOT_ANSWER_APPROACH"))
 	if config.MaxDepth <= 0 {
-		config.MaxDepth = parsePositiveInt(os.Getenv("TOT_MAX_DEPTH"))
+		config.MaxDepth = firstPositiveInt(defaultMaxDepth, os.Getenv("TOT_MAX_DEPTH"))
 	}
 	if config.BeamSize <= 0 {
 		config.BeamSize = parsePositiveInt(os.Getenv("TOT_BEAM_SIZE"))
 	}
 	if config.NSim <= 0 {
-		config.NSim = parsePositiveInt(os.Getenv("TOT_NSIM"))
+		config.NSim = firstPositiveInt(defaultNSim, os.Getenv("TOT_NSIM"))
 	}
 	if config.ForestSize <= 0 {
-		config.ForestSize = parsePositiveInt(os.Getenv("TOT_FOREST_SIZE"))
+		config.ForestSize = firstPositiveInt(defaultForestSize, os.Getenv("TOT_FOREST_SIZE"))
 	}
 	if config.RatingScale <= 0 {
 		config.RatingScale = parsePositiveInt(os.Getenv("TOT_RATING_SCALE"))
@@ -284,10 +293,17 @@ func queryRunner(ctx context.Context, runner *adk.Runner, prompt string) (*tot.R
 }
 
 // summarizeResponse 把 ToT 响应压成稳定摘要，便于 cmd 测试确认已经完成调用。
-func summarizeResponse(prompt string, response *tot.Response, usedCustomized bool) runOutput {
+func summarizeResponse(prompt string, response *tot.Response, usedCustomized bool, reasonConfig tot.ReasonConfig) runOutput {
+	method := response.Method
+	if method == "" {
+		method = reasonConfig.Method
+	}
 	output := runOutput{
 		Mode:                  "agent",
-		Method:                response.Method,
+		Method:                method,
+		MaxDepth:              reasonConfig.MaxDepth,
+		NSim:                  reasonConfig.NSim,
+		ForestSize:            reasonConfig.ForestSize,
 		PromptChars:           len([]rune(prompt)),
 		AnswerChars:           len([]rune(response.Answer)),
 		UsedADKCustomizedData: usedCustomized,
@@ -406,6 +422,16 @@ func parsePositiveInt(value string) int {
 		return 0
 	}
 	return parsed
+}
+
+// firstPositiveInt 优先使用环境变量中的正整数；没有配置时落到 cmd 的快速验证默认值。
+func firstPositiveInt(defaultValue int, values ...string) int {
+	for _, value := range values {
+		if parsed := parsePositiveInt(value); parsed > 0 {
+			return parsed
+		}
+	}
+	return defaultValue
 }
 
 // displayBaseURL 让默认地址在输出里更明确。

@@ -15,17 +15,49 @@ import (
 
 // TestRunAgentPrepareOnlyUsesDefaultDecisionPrompt 验证 cmd 默认能读到非 coding 决策 prompt。
 func TestRunAgentPrepareOnlyUsesDefaultDecisionPrompt(t *testing.T) {
+	clearTotEnv(t)
+
 	output, err := runAgent(context.Background(), []string{"-prepare-only", "-env", filepath.Join(t.TempDir(), "missing.env")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if output.Mode != "prepare-only" || output.Method != "mcts" || output.PromptChars == 0 {
+	if output.Mode != "prepare-only" || output.Method != "mcts" || output.MaxDepth != 1 || output.NSim != 1 || output.PromptChars == 0 {
 		t.Fatalf("output = %+v", output)
+	}
+}
+
+// TestRunAgentUsesFastMCTSDefaults 验证 cmd 默认只跑一轮 MCTS，避免真实模型验证耗时过长。
+func TestRunAgentUsesFastMCTSDefaults(t *testing.T) {
+	clearTotEnv(t)
+
+	oldFactory := newChatModel
+	fake := &cmdFakeModel{}
+	newChatModel = func(context.Context, modelConfig) (model.BaseChatModel, error) {
+		return fake, nil
+	}
+	defer func() { newChatModel = oldFactory }()
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("LLM_MODEL", "test-model")
+	output, err := runAgent(context.Background(), []string{
+		"-env", filepath.Join(t.TempDir(), "missing.env"),
+		"-message", "帮我在会议室、大学教室、咖啡馆之间选择一个读书会场地。",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Mode != "agent" || output.Method != "mcts" || output.MaxDepth != 1 || output.NSim != 1 || output.RootVisits != 1 {
+		t.Fatalf("output = %+v", output)
+	}
+	if fake.Count() != 3 {
+		t.Fatalf("fake model calls = %d, want 3", fake.Count())
 	}
 }
 
 // TestRunAgentCallsTotMCTSThroughADKRunner 验证 cmd 真实调用链是 ADK Runner -> ToT -> mctsReply。
 func TestRunAgentCallsTotMCTSThroughADKRunner(t *testing.T) {
+	clearTotEnv(t)
+
 	oldFactory := newChatModel
 	fake := &cmdFakeModel{}
 	newChatModel = func(context.Context, modelConfig) (model.BaseChatModel, error) {
@@ -65,6 +97,23 @@ func TestLoadPromptFromFile(t *testing.T) {
 	}
 	if prompt != "请帮我选择家庭旅行目的地。" {
 		t.Fatalf("prompt = %q", prompt)
+	}
+}
+
+// clearTotEnv 清理外部 ToT 环境变量，保证 cmd 默认值测试不被本机 .env 或 shell 污染。
+func clearTotEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"TOT_REASONING_METHOD",
+		"TOT_ANSWER_APPROACH",
+		"TOT_MAX_DEPTH",
+		"TOT_BEAM_SIZE",
+		"TOT_NSIM",
+		"TOT_FOREST_SIZE",
+		"TOT_RATING_SCALE",
+		"TOT_SCOPE",
+	} {
+		t.Setenv(key, "")
 	}
 }
 
