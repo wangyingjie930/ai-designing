@@ -51,6 +51,13 @@ func TestPrepareTriageContextBuildsTenantScopedHandles(t *testing.T) {
 	if !containsBlock(prepared.Selected, "current_customer_message") {
 		t.Fatalf("current customer message must be selected: %+v", prepared.Selected)
 	}
+	runtimeBlock, ok := findBlock(prepared.Selected, "runtime_identity")
+	if !ok {
+		t.Fatalf("runtime identity must be selected: %+v", prepared.Selected)
+	}
+	if runtimeBlock.Metadata[metadataContextRule] != "p0_runtime_guardrails" {
+		t.Fatalf("runtime identity missing policy trace: %+v", runtimeBlock.Metadata)
+	}
 	if len(prepared.Deferred) == 0 {
 		t.Fatal("expected P3 handles to be deferred")
 	}
@@ -61,6 +68,78 @@ func TestPrepareTriageContextBuildsTenantScopedHandles(t *testing.T) {
 		if block.Content != "" {
 			t.Fatalf("deferred block should not include content: %+v", block)
 		}
+	}
+}
+
+// TestPrepareTriageContextUsesCollectorAndCustomPolicy 验证生产采集器和业务策略可以替换默认 demo 映射。
+func TestPrepareTriageContextUsesCollectorAndCustomPolicy(t *testing.T) {
+	collector := &fakeSaaSContextCollector{
+		snapshot: SaaSContextSnapshot{
+			Tenant: TenantProfile{
+				TenantID:   "acme",
+				TenantName: "Acme From Collector",
+			},
+			ExtraItems: []ContextItem{
+				{
+					Name:     "collector_alert",
+					Content:  "payment timeout on checkout shard",
+					Priority: PriorityImportant,
+					TenantID: "acme",
+					Kind:     "alert",
+					Metadata: map[string]string{"source": "alert_store"},
+				},
+			},
+		},
+	}
+	customPolicy := &SaaSContextPolicy{
+		Name: "custom_policy",
+		Rules: []SaaSContextRule{
+			{
+				Name: "custom_runtime_identity",
+				Build: func(input SaaSContextBuildInput) ([]ContextItem, error) {
+					return []ContextItem{
+						{
+							Name:     "custom_collected_identity",
+							Content:  "tenant_id=" + input.Runtime.TenantID + "\ntenant_name=" + input.Tenant.TenantName,
+							Priority: PriorityCritical,
+							TenantID: input.Runtime.TenantID,
+							Kind:     "custom_runtime",
+							Metadata: map[string]string{metadataPriorityReason: "custom policy uses collector snapshot"},
+						},
+					}, nil
+				},
+			},
+		},
+	}
+	planner := NewSaaSTriagePlannerWithConfig(SaaSTriagePlannerConfig{
+		TriageConfig:  TriageConfig{Budget: 1000},
+		Collector:     collector,
+		ContextPolicy: customPolicy,
+	})
+
+	prepared, err := planner.PrepareTriageContext(context.Background(), TriageRequest{
+		Runtime: RuntimeContext{TenantID: "acme", UserID: "u1", SessionID: "s1"},
+		Tenant:  TenantProfile{TenantID: "globex", TenantName: "Ignored Request Tenant"},
+		Message: "支付失败了，帮我看一下。",
+	})
+	if err != nil {
+		t.Fatalf("PrepareTriageContext() error = %v", err)
+	}
+	if !collector.called {
+		t.Fatal("collector was not called")
+	}
+	identity, ok := findBlock(prepared.Selected, "custom_collected_identity")
+	if !ok {
+		t.Fatalf("custom policy item missing: %+v", prepared.Selected)
+	}
+	if !strings.Contains(identity.Content, "Acme From Collector") {
+		t.Fatalf("custom item did not use collector tenant: %+v", identity)
+	}
+	if identity.Metadata[metadataContextPolicy] != "custom_policy" {
+		t.Fatalf("custom item missing policy metadata: %+v", identity.Metadata)
+	}
+	if !containsBlock(prepared.Selected, "collector_alert") {
+		t.Fatalf("collector extra item missing: %+v", prepared.Selected)
 	}
 }
 
@@ -127,6 +206,18 @@ type fakeChatModel struct {
 	responses []string
 }
 
+// fakeSaaSContextCollector 是单测用的生产采集器替身，用来证明 planner 不依赖请求内联资料。
+type fakeSaaSContextCollector struct {
+	snapshot SaaSContextSnapshot
+	called   bool
+}
+
+// CollectSaaSContext 返回预设快照，并记录调用行为。
+func (c *fakeSaaSContextCollector) CollectSaaSContext(_ context.Context, _ TriageRequest) (SaaSContextSnapshot, error) {
+	c.called = true
+	return c.snapshot, nil
+}
+
 // Generate 记录模型输入并返回预设回复。
 func (m *fakeChatModel) Generate(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.Message, error) {
 	m.mu.Lock()
@@ -159,10 +250,16 @@ func containsName(items []ContextItem, name string) bool {
 
 // containsBlock 判断 prompt blocks 中是否包含指定名称。
 func containsBlock(blocks []ContextBlock, name string) bool {
+	_, ok := findBlock(blocks, name)
+	return ok
+}
+
+// findBlock 返回指定名称的上下文块，方便测试读取 metadata 和内容。
+func findBlock(blocks []ContextBlock, name string) (ContextBlock, bool) {
 	for _, block := range blocks {
 		if block.Name == name {
-			return true
+			return block, true
 		}
 	}
-	return false
+	return ContextBlock{}, false
 }

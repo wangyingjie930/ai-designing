@@ -1,0 +1,116 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 5 0 R 7 0 R 9 0 R 11 0 R] /Count 5 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 13 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 174 >>
+stream
+BT
+/F1 12 Tf
+72 740 Td
+(Payroll Bonus Policy 2026 v2) Tj
+0 -22 Td
+(EVIDENCE POLICY-2026-ELIGIBILITY) Tj
+0 -22 Td
+(Eligible employees must be active on the payout date.) Tj
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 13 0 R >> >> /Contents 6 0 R >>
+endobj
+6 0 obj
+<< /Length 186 >>
+stream
+BT
+/F1 12 Tf
+72 740 Td
+(Payroll Bonus Policy 2026 v2) Tj
+0 -22 Td
+(EVIDENCE POLICY-2026-EXCEPTION-APPROVAL) Tj
+0 -22 Td
+(Exceptional bonus cases require HRBP and Finance approval.) Tj
+ET
+endstream
+endobj
+7 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 13 0 R >> >> /Contents 8 0 R >>
+endobj
+8 0 obj
+<< /Length 196 >>
+stream
+BT
+/F1 12 Tf
+72 740 Td
+(Payroll Bonus Policy 2026 v2) Tj
+0 -22 Td
+(EVIDENCE POLICY-2026-DEFERRED-PAYOUT) Tj
+0 -22 Td
+(Deferred payout applies when payroll records are disputed before close.) Tj
+ET
+endstream
+endobj
+9 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 13 0 R >> >> /Contents 10 0 R >>
+endobj
+10 0 obj
+<< /Length 218 >>
+stream
+BT
+/F1 12 Tf
+72 740 Td
+(Payroll Bonus Policy 2026 v2) Tj
+0 -22 Td
+(EVIDENCE POLICY-2026-RELEASE-GATE) Tj
+0 -22 Td
+(Candidate RAG corpus must pass golden questions before alias payroll_rag_current canary release.) Tj
+ET
+endstream
+endobj
+11 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 13 0 R >> >> /Contents 12 0 R >>
+endobj
+12 0 obj
+<< /Length 214 >>
+stream
+BT
+/F1 12 Tf
+72 740 Td
+(Payroll Bonus Policy 2025 expired) Tj
+0 -22 Td
+(EVIDENCE POLICY-2025-EXPIRED-AUTO-BONUS) Tj
+0 -22 Td
+(Expired 2025 policy said disputed employees could receive automatic bonus uplift.) Tj
+ET
+endstream
+endobj
+13 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 14
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000140 00000 n 
+0000000267 00000 n 
+0000000492 00000 n 
+0000000619 00000 n 
+0000000856 00000 n 
+0000000983 00000 n 
+0000001230 00000 n 
+0000001358 00000 n 
+0000001628 00000 n 
+0000001757 00000 n 
+0000002023 00000 n 
+trailer
+<< /Size 14 /Root 1 0 R >>
+startxref
+2094
+%%EOF

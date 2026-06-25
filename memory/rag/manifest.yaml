@@ -1,0 +1,62 @@
+raw_docs:
+  - payroll-bonus-policy-2026-v2-regenerated.pdf
+
+index_manifest:
+  corpus_name: payroll-policy
+  collection_prefix: payroll_rag
+  components:
+    parser: pdf-parser-2.4
+    chunker: clause-aware-v2-2
+    embedding: gemini-embedding-001-1536
+    hybrid_index: bm25-cn-v1+dense-v3
+
+parser:
+  version: pdf-parser-2.4
+  params:
+    engine: llamaindex-pdfreader
+    return_full_document: false
+    ocr_enabled: false
+    table_mode: plain_text
+    page_split: true
+
+chunker:
+  version: clause-aware-v2-2
+  params:
+    splitter: llamaindex-sentence-splitter
+    chunk_size: 768
+    chunk_overlap: 101
+    separator: "\n"
+    secondary_chunking_regex: "[^。！？；;.!?\\n]+[。！？；;.!?]?|[\\n]+"
+    include_metadata: true
+    include_prev_next_rel: true
+
+embedding:
+  version: gemini-embedding-001-1536
+  params:
+    model: google:gemini-embedding-001
+    dim: 1536
+    output_dimensionality: 1536
+    embed_batch_size: 32
+    timeout_seconds: 60.0
+    max_retries: 5
+
+hybrid_index:
+  version: bm25-cn-v1+dense-v3
+  params:
+    dense:
+      engine: llamaindex-simple-vector-store
+      vector_store_file: default__vector_store.json
+      similarity: cosine
+    sparse:
+      engine: llamaindex-bm25-retriever
+      tokenizer: chinese-char-and-word
+      language: zh
+      skip_stemming: true
+      similarity_top_k: 12
+    ranking:
+      method: dense_cosine_plus_lexical_overlap
+      dense_weight: 1.0
+      lexical_weight: 1.0
+      metadata_filters:
+        role_allowed: true
+        exclude_expired: true

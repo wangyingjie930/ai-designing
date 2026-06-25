@@ -116,18 +116,36 @@ type PreparedTriageContext struct {
 	OutputContract []string       `json:"output_contract"`
 }
 
-// SaaSTriagePlanner 把 SaaS 客服候选资料转成 P0/P1/P2/P3 并执行分诊。
+// SaaSTriagePlanner 把生产采集到的 SaaS 客服资料按策略转成 P0/P1/P2/P3 并执行分诊。
 type SaaSTriagePlanner struct {
-	config TriageConfig
+	config        TriageConfig
+	collector     SaaSContextCollector
+	contextPolicy *SaaSContextPolicy
+}
+
+// SaaSTriagePlannerConfig 聚合分诊器依赖，方便生产注入采集器和业务线策略。
+type SaaSTriagePlannerConfig struct {
+	TriageConfig  TriageConfig
+	Collector     SaaSContextCollector
+	ContextPolicy *SaaSContextPolicy
 }
 
 // NewSaaSTriagePlanner 创建多租户 SaaS 客服分诊 planner。
 func NewSaaSTriagePlanner(config TriageConfig) *SaaSTriagePlanner {
-	return &SaaSTriagePlanner{config: config}
+	return NewSaaSTriagePlannerWithConfig(SaaSTriagePlannerConfig{TriageConfig: config})
+}
+
+// NewSaaSTriagePlannerWithConfig 创建可注入生产采集器和上下文策略的 planner。
+func NewSaaSTriagePlannerWithConfig(config SaaSTriagePlannerConfig) *SaaSTriagePlanner {
+	return &SaaSTriagePlanner{
+		config:        config.TriageConfig,
+		collector:     config.Collector,
+		contextPolicy: config.ContextPolicy,
+	}
 }
 
 // PrepareTriageContext 先做租户隔离校验，再构造可送入 Eino ADK 的分诊结果。
-func (p *SaaSTriagePlanner) PrepareTriageContext(_ context.Context, request TriageRequest) (*PreparedTriageContext, error) {
+func (p *SaaSTriagePlanner) PrepareTriageContext(ctx context.Context, request TriageRequest) (*PreparedTriageContext, error) {
 	if err := request.Runtime.Validate(); err != nil {
 		return nil, err
 	}
@@ -135,11 +153,20 @@ func (p *SaaSTriagePlanner) PrepareTriageContext(_ context.Context, request Tria
 	if request.Message == "" {
 		return nil, fmt.Errorf("customer message is required")
 	}
-	profile, err := normalizeTenantProfile(request.Runtime, request.Tenant)
+	collected, err := p.contextCollector().CollectSaaSContext(ctx, request)
+	if err != nil {
+		return nil, fmt.Errorf("collect SaaS context: %w", err)
+	}
+	profile, err := normalizeTenantProfile(request.Runtime, collected.Tenant)
 	if err != nil {
 		return nil, err
 	}
-	items, err := buildSaaSContextItems(request.Runtime, profile, request.Message, request.ExtraItems)
+	items, err := p.buildContextItems(SaaSContextBuildInput{
+		Runtime:    request.Runtime,
+		Tenant:     profile,
+		Message:    request.Message,
+		ExtraItems: collected.ExtraItems,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -169,6 +196,22 @@ func (p *SaaSTriagePlanner) PrepareTriageContext(_ context.Context, request Tria
 	}
 	prepared.Prompt = BuildPrompt(prepared)
 	return prepared, nil
+}
+
+// contextCollector 返回生产采集器，未注入时使用请求内联资料保持 demo 行为。
+func (p *SaaSTriagePlanner) contextCollector() SaaSContextCollector {
+	if p != nil && p.collector != nil {
+		return p.collector
+	}
+	return RequestSaaSContextCollector{}
+}
+
+// buildContextItems 执行上下文策略，保持采集和 P0/P1/P2/P3 映射职责分离。
+func (p *SaaSTriagePlanner) buildContextItems(input SaaSContextBuildInput) ([]ContextItem, error) {
+	if p != nil && p.contextPolicy != nil {
+		return p.contextPolicy.Build(input)
+	}
+	return DefaultSaaSContextPolicy().Build(input)
 }
 
 // DefaultSupportErrorDetector 识别客服故障里必须保留的错误证据。
@@ -244,59 +287,14 @@ func normalizeTenantProfile(runtime RuntimeContext, profile TenantProfile) (Tena
 	return profile, nil
 }
 
-// buildSaaSContextItems 将客服资料按文档规则映射到 P0/P1/P2/P3。
+// buildSaaSContextItems 保留旧单元路径，实际映射委托给默认上下文策略。
 func buildSaaSContextItems(runtime RuntimeContext, profile TenantProfile, message string, extraItems []ContextItem) ([]ContextItem, error) {
-	items := []ContextItem{
-		{
-			Name:     "platform_safety_policy",
-			Content:  strings.Join(profile.SafetyPolicies, "\n"),
-			Priority: PriorityCritical,
-			TenantID: runtime.TenantID,
-			Kind:     "safety_policy",
-		},
-		{
-			Name:     "runtime_identity",
-			Content:  runtimeIdentityText(runtime, profile),
-			Priority: PriorityCritical,
-			TenantID: runtime.TenantID,
-			Kind:     "runtime_schema",
-		},
-		{
-			Name:     "current_customer_message",
-			Content:  message,
-			Priority: PriorityCritical,
-			TenantID: runtime.TenantID,
-			Kind:     "customer_message",
-		},
-	}
-
-	if content := productConfigText(runtime, profile.ProductConfig); content != "" {
-		items = append(items, ContextItem{Name: "tenant_product_config_snapshot", Content: content, Priority: PriorityImportant, TenantID: runtime.TenantID, Kind: "product_config"})
-	}
-	if content := ticketContextText(profile.CurrentTicket); content != "" {
-		items = append(items, ContextItem{Name: "current_ticket_context", Content: content, Priority: PriorityImportant, TenantID: runtime.TenantID, Kind: "ticket_context"})
-	}
-	if content := recentTurnsText(profile.RecentTurns, 10); content != "" {
-		items = append(items, ContextItem{Name: "recent_session_turns", Content: content, Priority: PriorityImportant, TenantID: runtime.TenantID, Kind: "conversation_history"})
-	}
-	if content := knowledgeIndexesText("产品手册目录索引", profile.ManualIndexes); content != "" {
-		items = append(items, ContextItem{Name: "tenant_manual_index_summary", Content: content, Priority: PrioritySupporting, TenantID: runtime.TenantID, Kind: "manual_index", Handle: TenantHandle("manual_index", runtime.TenantID, "root")})
-	}
-	if content := knowledgeIndexesText("FAQ 摘要", profile.FAQSummaries); content != "" {
-		items = append(items, ContextItem{Name: "tenant_faq_summary", Content: content, Priority: PrioritySupporting, TenantID: runtime.TenantID, Kind: "faq_summary", Handle: TenantHandle("faq_index", runtime.TenantID, "root")})
-	}
-	if content := knowledgeIndexesText("相似历史工单摘要", profile.SimilarTicketSummaries); content != "" {
-		items = append(items, ContextItem{Name: "similar_ticket_cluster_summary", Content: content, Priority: PrioritySupporting, TenantID: runtime.TenantID, Kind: "similar_ticket_summary", Handle: TenantHandle("ticket_cluster", runtime.TenantID, "recent")})
-	}
-	for _, resource := range profile.DeferredResources {
-		item, err := resourceToContextItem(runtime.TenantID, resource)
-		if err != nil {
-			return nil, err
-		}
-		items = append(items, item)
-	}
-	items = append(items, extraItems...)
-	return normalizeSaaSItems(runtime, items)
+	return DefaultSaaSContextPolicy().Build(SaaSContextBuildInput{
+		Runtime:    runtime,
+		Tenant:     profile,
+		Message:    message,
+		ExtraItems: extraItems,
+	})
 }
 
 // normalizeSaaSItems 在进入模型前统一做租户归属和 P3 handle 校验。

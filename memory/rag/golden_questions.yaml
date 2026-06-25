@@ -1,0 +1,31 @@
+golden_questions:
+  - id: eligibility_evidence
+    question: Which employees are eligible for the 2026 bonus payout?
+    actor_roles: ["employee"]
+    expected_evidence_ids: ["POLICY-2026-ELIGIBILITY"]
+    required_phrases:
+      - active on the payout date
+
+  - id: exception_approval_evidence
+    question: Who must approve exceptional bonus cases?
+    actor_roles: ["finance"]
+    expected_evidence_ids: ["POLICY-2026-EXCEPTION-APPROVAL"]
+    required_phrases:
+      - HRBP and Finance approval
+
+  - id: permission_filter_employee
+    question: Who must approve exceptional bonus cases?
+    actor_roles: ["employee"]
+    forbidden_evidence_ids: ["POLICY-2026-EXCEPTION-APPROVAL"]
+
+  - id: expired_policy_excluded
+    question: Can disputed employees receive automatic bonus uplift from the 2025 policy?
+    actor_roles: ["hrbp"]
+    forbidden_evidence_ids: ["POLICY-2025-EXPIRED-AUTO-BONUS"]
+
+  - id: quality_gate_evidence
+    question: When is payroll_rag_current ready to serve business queries?
+    actor_roles: ["release_manager"]
+    expected_evidence_ids: ["POLICY-2026-RELEASE-GATE"]
+    required_phrases:
+      - pass golden questions before serving payroll business queries

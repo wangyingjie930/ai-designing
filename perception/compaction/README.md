@@ -6,6 +6,31 @@
 - Level 2: 把旧历史增量合并进五槽位 Anchor：intent、changes、decisions、excluded approaches、next steps。
 - Level 3: 极限压缩时导出 handoff summary，把它视为交接信号，而不是普通继续压缩。
 
+核心 Agent 流程：
+
+```mermaid
+flowchart TD
+    A["用户消息 + 工单上下文"] --> B["SupportAgent.Query"]
+    B --> C["Session.BuildPromptView"]
+    C --> D["TokenLimitCompactionMiddleware<br/>分类历史 + 计算 token pressure"]
+    D --> E{"ShouldCompact?<br/>按 token + severity + SLA 判断"}
+    E -->|否| F["PromptView<br/>保留原始历史"]
+    E -->|是| G["SupportCompactor<br/>执行三层语义压缩"]
+    G --> H["L1<br/>遮蔽tool消息<br/>错误信息的 Turn 不丢"]
+    H --> I{"压到 target 内?"}
+    I -->|是| L["PromptView<br/>压缩上下文"]
+    I -->|否| J["L2<br/>旧历史合并进五个槽位<br/>保留错误 + 最近历史"]
+    J --> K{"压到 target 内?"}
+    K -->|是| L
+    K -->|否| M["L3<br/>五个槽位 + 摘要旧错误 + 保留最近错误<br/>handoff recommended"]
+    M --> L
+    F --> N["ADK Runner<br/>ChatModelAgent 生成回复/工具调用"]
+    L --> N
+    N --> O["写回 Session<br/>user/action/observation/assistant"]
+```
+
+记忆点：这个模式不是在 `cmd` 层手动裁剪 prompt，而是每轮 Agent 调用前由 middleware 判断 token 压力；没超阈值就原样继续，超阈值才按 L1/L2/L3 逐级压缩，并把 `PromptView` 交给 ADK Runner。
+
 客服增强点：
 
 - `SupportContext` 按 `severity` 和 `sla_deadline` 动态下调触发阈值。

@@ -21,14 +21,16 @@ const (
 
 // AgentConfig 配置 Eino ADK 多租户 SaaS 客服分诊 Agent。
 type AgentConfig struct {
-	Name          string
-	Description   string
-	Instruction   string
-	Planner       *SaaSTriagePlanner
-	TriageConfig  TriageConfig
-	ResourceStore ResourceStore
-	ExtraTools    []tool.BaseTool
-	MaxIterations int
+	Name             string
+	Description      string
+	Instruction      string
+	Planner          *SaaSTriagePlanner
+	TriageConfig     TriageConfig
+	ContextCollector SaaSContextCollector
+	ContextPolicy    *SaaSContextPolicy
+	ResourceStore    ResourceStore
+	ExtraTools       []tool.BaseTool
+	MaxIterations    int
 }
 
 // NewPrepareTriageContextTool 暴露 deterministic context triage 流程给 ADK。
@@ -66,7 +68,11 @@ func NewSaaSTriageAgent(ctx context.Context, chatModel model.BaseChatModel, conf
 
 	planner := config.Planner
 	if planner == nil {
-		planner = NewSaaSTriagePlanner(config.TriageConfig)
+		planner = NewSaaSTriagePlannerWithConfig(SaaSTriagePlannerConfig{
+			TriageConfig:  config.TriageConfig,
+			Collector:     config.ContextCollector,
+			ContextPolicy: config.ContextPolicy,
+		})
 	}
 	prepareTool, err := NewPrepareTriageContextTool(planner)
 	if err != nil {

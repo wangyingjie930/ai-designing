@@ -151,26 +151,36 @@ func (c *SupportCompactor) Compact(ctx context.Context, support SupportContext, 
 	return c.compactClassified(ctx, support, classified, pressure)
 }
 
-// compactClassified 对已分类历史执行真实压缩；未超阈值时只返回历史副本。
+// compactClassified 对已分类历史执行真实压缩；这是长会话 Agent 进入模型前的核心压缩主流程。
+// 主流程按 L1 -> L2 -> L3 逐级兜底：先尽量保留原始历史，再沉淀 Anchor，最后才发出交接信号。
 func (c *SupportCompactor) compactClassified(ctx context.Context, support SupportContext, classified []Turn, pressure TokenPressure) ([]Turn, *CompactionEvent, error) {
+	// token 压力没到触发线时，不做任何压缩，也不记录 CompactionEvent。
 	if !pressure.ShouldCompact {
 		return cloneTurns(classified), nil, nil
 	}
+
+	// recent 是模型最需要看到的近场上下文，始终尽量原样保留；old 才是主要压缩对象。
 	boundary := len(classified) - c.config.PreserveRecent
 	if boundary < 0 {
 		boundary = 0
 	}
 	old := classified[:boundary]
 	recent := classified[boundary:]
+
+	// 错误 Turn 是排障证据，不能被普通摘要吃掉；后续 L2/L3 都会单独保护它们。
 	errors := filterTurns(old, func(t Turn) bool { return t.IsError })
 	errorsIn := countErrors(classified)
 
+	// L1：只遮蔽非错误的长 Observation，保留 Action 路径和可回查 handle。
+	// 适合“工具输出太长但并非关键错误证据”的场景。
 	level1 := append(c.clearObservations(old), cloneTurns(recent)...)
 	if totalTokens(level1) <= c.config.TargetTokens {
 		event := c.recordEvent(1, support, classified, level1, errorsIn, countErrors(level1), false)
 		return level1, &event, nil
 	}
 
+	// L2：L1 仍然太长时，把旧的非错误历史折叠进五槽位 Anchor。
+	// Anchor 负责保存工单意图、已尝试动作、已做决策、已排除方案和下一步。
 	nonErrorOld := filterTurns(old, func(t Turn) bool { return !t.IsError })
 	if len(nonErrorOld) > 0 {
 		next, err := c.config.AnchorUpdater.UpdateAnchor(ctx, c.anchor, nonErrorOld, support)
@@ -179,6 +189,8 @@ func (c *SupportCompactor) compactClassified(ctx context.Context, support Suppor
 		}
 		c.anchor = next
 	}
+
+	// L2 输出只带 Anchor、受保护错误和最近历史，避免旧的普通对话继续占满 prompt。
 	anchorTurn := c.anchorTurn()
 	level2 := append([]Turn{anchorTurn}, append(cloneTurns(errors), cloneTurns(recent)...)...)
 	if totalTokens(level2) <= c.config.TargetTokens {
@@ -186,6 +198,8 @@ func (c *SupportCompactor) compactClassified(ctx context.Context, support Suppor
 		return level2, &event, nil
 	}
 
+	// L3：连 Anchor + 全量错误 + 最近历史都太长时，进入交接级压缩。
+	// 只保留最近错误原文，较早错误折叠为“不要盲目重试”的错误摘要。
 	recentErrors := tailTurns(errors, c.config.MaxRecentErrors)
 	oldErrors := errors[:len(errors)-len(recentErrors)]
 	errorSummary, represented := c.summarizeOldErrors(oldErrors)
@@ -196,6 +210,8 @@ func (c *SupportCompactor) compactClassified(ctx context.Context, support Suppor
 	level3 = append(level3, cloneTurns(recentErrors)...)
 	level3 = append(level3, cloneTurns(recent)...)
 	event := c.recordEvent(3, support, classified, level3, errorsIn, countErrors(level3), true)
+
+	// L3 中一部分错误已经被摘要代表，不一定还以原始 Turn 形式存在，所以要修正事件里的错误表示数量。
 	event.ErrorTracesRepresented = countErrors(recent) + len(recentErrors) + represented
 	c.events[len(c.events)-1] = event
 	return level3, &event, nil
