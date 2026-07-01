@@ -152,6 +152,40 @@ func TestForkScenarioPassesTaskTextToIsolatedSubAgent(t *testing.T) {
 	}
 }
 
+// TestNewRunnerUsesConfiguredSkillBackend 验证 agent 可以接入 registry-backed backend，而不是固定读取本地文件。
+func TestNewRunnerUsesConfiguredSkillBackend(t *testing.T) {
+	ctx := context.Background()
+	query := "请审查客服回复：我们保证你下月成绩提升。"
+	backend, err := NewRegistryBackend(registryTestManifest("2026-07-01.2"), RegistryBackendOptions{Channel: "prod"})
+	if err != nil {
+		t.Fatalf("NewRegistryBackend() error = %v", err)
+	}
+	fake := &skillModeFakeModel{targetSkill: "compliance_review_isolated", task: query}
+	runner, err := NewRunner(ctx, Config{
+		Mode:          ModeFork,
+		Model:         fake,
+		SubAgentModel: fake,
+		SkillBackend:  backend,
+		MaxIterations: 5,
+	})
+	if err != nil {
+		t.Fatalf("NewRunner() error = %v", err)
+	}
+
+	if _, err := QueryRunner(ctx, runner, query); err != nil {
+		t.Fatalf("QueryRunner() error = %v", err)
+	}
+	got := strings.Join(fake.subAgentInputs, "\n")
+	for _, want := range []string{
+		"registry://compliance_review_isolated/2026-07-01.2",
+		"版本 2026-07-01.2",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("sub agent input missing %q:\n%s", want, got)
+		}
+	}
+}
+
 // TestForkWithContextScenarioUsesSubAgent 验证 fork_with_context 会进入 AgentHub 提供的专家子 agent。
 func TestForkWithContextScenarioUsesSubAgent(t *testing.T) {
 	ctx := context.Background()

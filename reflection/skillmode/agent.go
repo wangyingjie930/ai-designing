@@ -23,6 +23,7 @@ type Config struct {
 	MaxIterations          int
 	SubAgentMaxIterations  int
 	Scenarios              map[Mode]Scenario
+	SkillBackend           skill.Backend
 	CustomSkillToolName    string
 	DisableChineseSkillTip bool
 }
@@ -60,7 +61,7 @@ func NewAgent(ctx context.Context, config Config) (*adk.ChatModelAgent, error) {
 	if err != nil {
 		return nil, err
 	}
-	backend, err := NewSkillBackend(ctx, scenarios)
+	backend, err := resolveSkillBackend(ctx, config, scenarios)
 	if err != nil {
 		return nil, err
 	}
@@ -105,6 +106,14 @@ func NewAgent(ctx context.Context, config Config) (*adk.ChatModelAgent, error) {
 		MaxIterations: maxIterations,
 		Handlers:      []adk.ChatModelAgentMiddleware{handler},
 	})
+}
+
+// resolveSkillBackend 允许生产注入 registry-backed backend，未配置时保留本地 SKILL.md 演示路径。
+func resolveSkillBackend(ctx context.Context, config Config, scenarios map[Mode]Scenario) (skill.Backend, error) {
+	if config.SkillBackend != nil {
+		return config.SkillBackend, nil
+	}
+	return NewSkillBackend(ctx, scenarios)
 }
 
 // skillToolArguments 承载 skill 工具调用参数，task 是 fork 隔离模式下唯一可靠的业务输入。

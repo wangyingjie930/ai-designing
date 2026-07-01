@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	adkskill "github.com/cloudwego/eino/adk/middlewares/skill"
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
@@ -51,6 +52,73 @@ func TestRunAgentUsesSkillMiddleware(t *testing.T) {
 	}
 	if fake.skillToolCalls != 1 || fake.subAgentCalls != 1 {
 		t.Fatalf("fake calls skill=%d sub=%d", fake.skillToolCalls, fake.subAgentCalls)
+	}
+}
+
+// TestRunAgentUsesRegistrySkillBackend 验证 main 路径默认接入 registry backend，而不是只在包测试里手工注入。
+func TestRunAgentUsesRegistrySkillBackend(t *testing.T) {
+	oldFactory := newChatModel
+	fake := &cmdSkillModeFakeModel{targetSkill: "compliance_review_isolated"}
+	newChatModel = func(context.Context, modelConfig) (model.BaseChatModel, error) {
+		return fake, nil
+	}
+	defer func() { newChatModel = oldFactory }()
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("LLM_MODEL", "test-model")
+	output, err := runAgent(context.Background(), []string{
+		"-mode", "fork",
+		"-message", "客户要求客服承诺保证下月成绩提升。",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Mode != "agent" || output.SkillMode != skillmode.ModeFork {
+		t.Fatalf("output = %+v", output)
+	}
+	got := strings.Join(fake.subAgentInputs, "\n")
+	for _, want := range []string{
+		"Base directory for this skill: registry://compliance_review_isolated/repo-snapshot-v1",
+		"不要继承主对话中的未验证事实",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("sub agent input missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestBuildDemoSkillReleaseManifestUsesScenarioMetadata 验证 manifest 由发布侧场景显式构造，而不是复用 local backend 扫描结果。
+func TestBuildDemoSkillReleaseManifestUsesScenarioMetadata(t *testing.T) {
+	scenarios := map[skillmode.Mode]skillmode.Scenario{
+		skillmode.ModeFork: {
+			Mode:        skillmode.ModeFork,
+			SkillName:   "compliance_review_isolated",
+			Title:       "发布侧合规审查",
+			Rationale:   "发布侧描述只来自 Scenario",
+			ContextMode: adkskill.ContextModeForkWithContext,
+			AgentName:   "scenario_declared_agent",
+		},
+	}
+
+	manifest, err := buildDemoSkillReleaseManifest(context.Background(), scenarios)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Artifacts) != 1 || len(manifest.Aliases) != 1 {
+		t.Fatalf("manifest = %+v", manifest)
+	}
+	artifact := manifest.Artifacts[0]
+	if artifact.FrontMatter.Name != "compliance_review_isolated" {
+		t.Fatalf("artifact name = %q", artifact.FrontMatter.Name)
+	}
+	if artifact.FrontMatter.Description != "发布侧描述只来自 Scenario" {
+		t.Fatalf("artifact description = %q", artifact.FrontMatter.Description)
+	}
+	if artifact.FrontMatter.Context != adkskill.ContextModeForkWithContext {
+		t.Fatalf("artifact context = %q", artifact.FrontMatter.Context)
+	}
+	if artifact.FrontMatter.Agent != "scenario_declared_agent" {
+		t.Fatalf("artifact agent = %q", artifact.FrontMatter.Agent)
 	}
 }
 
@@ -114,6 +182,7 @@ type cmdSkillModeFakeModel struct {
 	targetSkill    string
 	skillToolCalls int
 	subAgentCalls  int
+	subAgentInputs []string
 }
 
 // Generate 根据系统提示区分主 agent 与 Skill fork 子 agent。
@@ -121,6 +190,7 @@ func (m *cmdSkillModeFakeModel) Generate(_ context.Context, input []*schema.Mess
 	system := firstContentByRole(input, schema.System)
 	if strings.Contains(system, "Skill 模式专家子 Agent") {
 		m.subAgentCalls++
+		m.subAgentInputs = append(m.subAgentInputs, joinMessageContents(input))
 		return schema.AssistantMessage("专家复核：建议提供一次补偿课，并承诺主管回访。", nil), nil
 	}
 	if firstMessageByRole(input, schema.Tool) == nil {
@@ -154,6 +224,15 @@ func (m *cmdSkillModeFakeModel) skillArguments(task string) string {
 	}
 	data, _ := json.Marshal(args)
 	return string(data)
+}
+
+// joinMessageContents 汇总消息正文，便于断言命令入口传入子 Agent 的 Skill 内容。
+func joinMessageContents(messages []*schema.Message) string {
+	contents := make([]string, 0, len(messages))
+	for _, message := range messages {
+		contents = append(contents, message.Content)
+	}
+	return strings.Join(contents, "\n")
 }
 
 // firstContentByRole 返回指定角色的第一条内容。

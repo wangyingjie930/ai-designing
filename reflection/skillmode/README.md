@@ -17,10 +17,40 @@
 三个 Skill 都是真实文件：
 
 ```text
-reasoning/skillmode/skills/
+reflection/skillmode/skills/
 ├── support_reply_inline/SKILL.md
 ├── compensation_review_with_context/SKILL.md
 └── compliance_review_isolated/SKILL.md
+```
+
+## 生产发布与回滚
+
+命令入口默认由 `DefaultScenarios()` 显式构造 registry manifest，并把对应 `SKILL.md` 正文快照成 artifact，再通过 prod alias 交给 Eino Skill Middleware。这里不会复用 local backend 的扫描结果；local backend 只用于 `-skill-backend local` 的旧演示路径。生产环境不建议把“文件最新内容”当作线上版本，而应把 Skill 发布成不可变 artifact，再通过 alias 指向实际生效版本：
+
+```text
+compliance_review_isolated@prod -> 2026-07-01.1
+compliance_review_isolated@canary -> 2026-07-01.2
+compliance_review_isolated@tenant_a -> 2026-07-01.2
+```
+
+`registry_backend.go` 提供了一个最小 registry-backed `skill.Backend`：同一个 `skill.NewMiddleware` 可以继续使用 Eino 官方执行流程，但 Skill 内容由 `SkillReleaseManifest` 解析，运行时按 `channel` / `tenant` 选择 alias。回滚时不修改 artifact 内容，只把 alias 从新版本指回旧版本。需要对比旧演示路径时，可以在命令行传 `-skill-backend local`。
+
+在代码里接入时，把 registry backend 注入 `Config.SkillBackend`：
+
+```go
+backend, err := skillmode.NewRegistryBackend(manifest, skillmode.RegistryBackendOptions{
+	Channel: "prod",
+	Tenant:  "tenant_a",
+})
+if err != nil {
+	return err
+}
+
+runner, err := skillmode.NewRunner(ctx, skillmode.Config{
+	Mode:         skillmode.ModeFork,
+	Model:        chatModel,
+	SkillBackend: backend,
+})
 ```
 
 ## fork 模式输入边界
@@ -36,8 +66,9 @@ reasoning/skillmode/skills/
 
 ## 代码结构
 
-- `skills.go`：定义场景元信息，并把 `reasoning/skillmode/skills` 接入官方 Skill Middleware。
+- `skills.go`：定义场景元信息，并把 `reflection/skillmode/skills` 接入官方 Skill Middleware。
 - `local_filesystem.go`：把本地目录适配为 Eino `filesystem.Backend`，供 `skill.NewBackendFromFilesystem` 扫描。
+- `registry_backend.go`：用不可变 artifact + alias manifest 实现生产形态的 Skill 版本解析。
 - `agent.go`：创建带 Skill Middleware 的 `adk.ChatModelAgent` 和 runner。
 - `hub.go`：实现 `skill.AgentHub`，给 `fork` / `fork_with_context` 创建专家子 agent。
 - `cmd/skill-mode-agent`：命令入口，负责 `.env`、模型创建、CozeLoop 安装和简洁 root trace。
@@ -56,6 +87,7 @@ go run ./cmd/skill-mode-agent -prepare-only -mode fork
 
 ```bash
 go run ./cmd/skill-mode-agent -mode fork_with_context
+go run ./cmd/skill-mode-agent -mode fork -skill-backend registry
 ```
 
 可用环境变量：
@@ -65,6 +97,7 @@ go run ./cmd/skill-mode-agent -mode fork_with_context
 - `LLM_OPENAI_BASE_URL` / `OPENAI_BASE_URL` / `OPENAI_API_BASE` / `OPENAI_API_BASE_URL`
 - `COZELOOP_*`，沿用仓库现有 `observability/cozeloop` 配置
 - `SKILL_MODE_AGENT_MODE`
+- `SKILL_MODE_AGENT_BACKEND`：`registry` 或 `local`，默认 `registry`
 - `SKILL_MODE_AGENT_MAX_ITERATIONS`
 
 ## Trace 边界
@@ -74,6 +107,7 @@ go run ./cmd/skill-mode-agent -mode fork_with_context
 - `skill_mode`
 - `scenario`
 - `skill_name`
+- `skill_backend`
 - `query_chars`
 - `answer_chars`
 

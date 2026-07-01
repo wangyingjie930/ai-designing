@@ -8,10 +8,13 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/cloudwego/eino-ext/components/model/openai"
+	adkskill "github.com/cloudwego/eino/adk/middlewares/skill"
 	"github.com/cloudwego/eino/components/model"
 
 	"ai-designing/cmd/internal/e2etest"
@@ -19,7 +22,10 @@ import (
 )
 
 const (
-	defaultEnvPath = ".env"
+	defaultEnvPath                 = ".env"
+	skillBackendLocal              = "local"
+	skillBackendRegistry           = "registry"
+	defaultRegistrySnapshotVersion = "repo-snapshot-v1"
 )
 
 // runConfig 保存命令行参数，cmd 只负责把外部输入转成 Skill mode agent 调用。
@@ -31,6 +37,7 @@ type runConfig struct {
 	PrepareOnly   bool
 	PrintJSON     bool
 	MaxIterations int
+	SkillBackend  string
 }
 
 // modelConfig 保存 OpenAI-compatible 模型连接信息。
@@ -42,12 +49,13 @@ type modelConfig struct {
 
 // runOutput 是命令执行后的稳定摘要，trace 和测试都只看这些字段。
 type runOutput struct {
-	Mode        string          `json:"mode"`
-	SkillMode   skillmode2.Mode `json:"skill_mode"`
-	Scenario    string          `json:"scenario"`
-	SkillName   string          `json:"skill_name"`
-	QueryChars  int             `json:"query_chars"`
-	AnswerChars int             `json:"answer_chars"`
+	Mode         string          `json:"mode"`
+	SkillMode    skillmode2.Mode `json:"skill_mode"`
+	Scenario     string          `json:"scenario"`
+	SkillName    string          `json:"skill_name"`
+	SkillBackend string          `json:"skill_backend"`
+	QueryChars   int             `json:"query_chars"`
+	AnswerChars  int             `json:"answer_chars"`
 }
 
 // skillModeReport 是可选 JSON 输出，保留最终答复方便人工检查。
@@ -90,11 +98,12 @@ func runAgent(ctx context.Context, args []string) (runOutput, error) {
 		return runOutput{}, err
 	}
 	output := runOutput{
-		Mode:       "prepare-only",
-		SkillMode:  scenario.Mode,
-		Scenario:   scenario.Title,
-		SkillName:  scenario.SkillName,
-		QueryChars: len([]rune(query)),
+		Mode:         "prepare-only",
+		SkillMode:    scenario.Mode,
+		Scenario:     scenario.Title,
+		SkillName:    scenario.SkillName,
+		SkillBackend: config.SkillBackend,
+		QueryChars:   len([]rune(query)),
 	}
 	if config.PrepareOnly {
 		fmt.Println("=== Skill Mode Agent Query ===")
@@ -122,11 +131,16 @@ func runAgent(ctx context.Context, args []string) (runOutput, error) {
 		if err != nil {
 			return runOutput{}, fmt.Errorf("init chat model: %w", err)
 		}
+		skillBackend, err := buildCommandSkillBackend(traceCtx, config)
+		if err != nil {
+			return runOutput{}, err
+		}
 		runner, err := skillmode2.NewRunner(traceCtx, skillmode2.Config{
 			Mode:          scenario.Mode,
 			Model:         chatModel,
 			SubAgentModel: chatModel,
 			MaxIterations: config.MaxIterations,
+			SkillBackend:  skillBackend,
 		})
 		if err != nil {
 			return runOutput{}, err
@@ -137,7 +151,8 @@ func runAgent(ctx context.Context, args []string) (runOutput, error) {
 		}
 		response := skillmode2.BuildResponse(scenario, query, rawResponse.Message)
 		output := summarizeResponse(response)
-		fmt.Printf("model=%s\nbase_url=%s\napi_key=%s\n", modelConfig.Model, displayBaseURL(modelConfig.BaseURL), redactKey(modelConfig.APIKey))
+		output.SkillBackend = config.SkillBackend
+		fmt.Printf("model=%s\nbase_url=%s\napi_key=%s\nskill_backend=%s\n", modelConfig.Model, displayBaseURL(modelConfig.BaseURL), redactKey(modelConfig.APIKey), config.SkillBackend)
 		fmt.Printf("cozeloop=%s endpoint=%s workspace=%s\n", enabledText(cozeLoopConfig.Enabled), cozeloopobs.DisplayEndpoint(cozeLoopConfig), cozeloopobs.DisplayWorkspaceID(cozeLoopConfig))
 		printAgentResult(response, output)
 		if config.PrintJSON {
@@ -147,7 +162,7 @@ func runAgent(ctx context.Context, args []string) (runOutput, error) {
 	})
 }
 
-// parseRunConfig 读取 flags 和 .env，默认使用 inline 场景。
+// parseRunConfig 读取 flags 和 .env，并填充命令入口默认值。
 func parseRunConfig(args []string) (runConfig, error) {
 	fs := flag.NewFlagSet("skill-mode-agent", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -155,8 +170,10 @@ func parseRunConfig(args []string) (runConfig, error) {
 		EnvPath: defaultEnvPath,
 	}
 	modeValue := ""
+	backendValue := ""
 	fs.StringVar(&config.EnvPath, "env", defaultEnvPath, "env file path")
 	fs.StringVar(&modeValue, "mode", "fork_with_context", "skill mode: inline, fork_with_context, fork")
+	fs.StringVar(&backendValue, "skill-backend", "", "skill backend: registry or local")
 	fs.StringVar(&config.Message, "message", "", "customer-support request")
 	fs.StringVar(&config.MessageFile, "message-file", "", "file containing the request")
 	fs.BoolVar(&config.PrepareOnly, "prepare-only", false, "print request without calling model")
@@ -172,9 +189,120 @@ func parseRunConfig(args []string) (runConfig, error) {
 	if err != nil {
 		return runConfig{}, err
 	}
+	backend, err := parseSkillBackend(firstNonEmpty(backendValue, os.Getenv("SKILL_MODE_AGENT_BACKEND"), skillBackendRegistry))
+	if err != nil {
+		return runConfig{}, err
+	}
 	config.Mode = mode
+	config.SkillBackend = backend
 	config.MaxIterations = firstPositive(config.MaxIterations, parsePositiveInt(os.Getenv("SKILL_MODE_AGENT_MAX_ITERATIONS")), 6)
 	return config, nil
+}
+
+// buildCommandSkillBackend 为 main 路径构造实际传入 Runner 的 Skill backend。
+func buildCommandSkillBackend(ctx context.Context, config runConfig) (adkskill.Backend, error) {
+	switch config.SkillBackend {
+	case skillBackendLocal:
+		return nil, nil
+	case skillBackendRegistry:
+		manifest, err := buildDemoSkillReleaseManifest(ctx, skillmode2.DefaultScenarios())
+		if err != nil {
+			return nil, err
+		}
+		return skillmode2.NewRegistryBackend(manifest, skillmode2.RegistryBackendOptions{Channel: "prod"})
+	default:
+		return nil, fmt.Errorf("unsupported skill backend %q", config.SkillBackend)
+	}
+}
+
+// buildDemoSkillReleaseManifest 显式构造发布 manifest；local backend 只属于 local 运行路径。
+func buildDemoSkillReleaseManifest(_ context.Context, scenarios map[skillmode2.Mode]skillmode2.Scenario) (skillmode2.SkillReleaseManifest, error) {
+	ordered := make([]skillmode2.Scenario, 0, len(scenarios))
+	for _, scenario := range scenarios {
+		ordered = append(ordered, scenario)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		return ordered[i].SkillName < ordered[j].SkillName
+	})
+
+	artifacts := make([]skillmode2.SkillArtifact, 0, len(ordered))
+	aliases := make([]skillmode2.SkillAlias, 0, len(ordered))
+	for _, scenario := range ordered {
+		frontMatter, err := frontMatterFromScenario(scenario)
+		if err != nil {
+			return skillmode2.SkillReleaseManifest{}, err
+		}
+		content, err := readDemoSkillBody(scenario.SkillName)
+		if err != nil {
+			return skillmode2.SkillReleaseManifest{}, err
+		}
+		artifacts = append(artifacts, skillmode2.SkillArtifact{
+			FrontMatter: frontMatter,
+			Version:     defaultRegistrySnapshotVersion,
+			Owner:       "skillmode-demo",
+			SourceSHA:   "local-repo-snapshot",
+			Content:     content,
+		})
+		aliases = append(aliases, skillmode2.SkillAlias{
+			SkillName: frontMatter.Name,
+			Channel:   "prod",
+			Version:   defaultRegistrySnapshotVersion,
+		})
+	}
+	return skillmode2.SkillReleaseManifest{
+		Artifacts: artifacts,
+		Aliases:   aliases,
+	}, nil
+}
+
+// frontMatterFromScenario 把发布侧场景声明转换成 Skill manifest 元数据，避免依赖 SKILL.md frontmatter。
+func frontMatterFromScenario(scenario skillmode2.Scenario) (adkskill.FrontMatter, error) {
+	name := strings.TrimSpace(scenario.SkillName)
+	if name == "" {
+		return adkskill.FrontMatter{}, fmt.Errorf("scenario skill name is required")
+	}
+	description := strings.TrimSpace(scenario.Rationale)
+	if description == "" {
+		description = strings.TrimSpace(scenario.Title)
+	}
+	if description == "" {
+		return adkskill.FrontMatter{}, fmt.Errorf("scenario description is required: %s", name)
+	}
+	return adkskill.FrontMatter{
+		Name:        name,
+		Description: description,
+		Context:     scenario.ContextMode,
+		Agent:       strings.TrimSpace(scenario.AgentName),
+	}, nil
+}
+
+// readDemoSkillBody 只读取 Skill 指令正文；发布元数据由 Scenario 显式提供。
+func readDemoSkillBody(skillName string) (string, error) {
+	path := e2etest.ResolvePath(filepath.Join(skillmode2.DefaultSkillsDir, strings.TrimSpace(skillName), "SKILL.md"))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return extractSkillBody(string(data))
+}
+
+// extractSkillBody 去掉 SKILL.md frontmatter，避免 manifest 构建时复用本地 backend 的解析结果。
+func extractSkillBody(content string) (string, error) {
+	const delimiter = "---"
+	trimmed := strings.TrimSpace(content)
+	if !strings.HasPrefix(trimmed, delimiter) {
+		return "", fmt.Errorf("skill frontmatter delimiter is required")
+	}
+	rest := strings.TrimPrefix(trimmed, delimiter)
+	_, body, ok := strings.Cut(rest, delimiter)
+	if !ok {
+		return "", fmt.Errorf("skill closing frontmatter delimiter is required")
+	}
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return "", fmt.Errorf("skill body is empty")
+	}
+	return body, nil
 }
 
 // loadMessage 读取用户传入消息；未传时使用场景默认客服输入。
@@ -240,6 +368,19 @@ func parseMode(value string) (skillmode2.Mode, error) {
 		return mode, nil
 	default:
 		return "", fmt.Errorf("unsupported mode %q; use inline, fork_with_context, or fork", value)
+	}
+}
+
+// parseSkillBackend 校验命令入口支持的 Skill backend 类型。
+func parseSkillBackend(value string) (string, error) {
+	backend := strings.TrimSpace(value)
+	switch backend {
+	case "", skillBackendRegistry:
+		return skillBackendRegistry, nil
+	case skillBackendLocal:
+		return skillBackendLocal, nil
+	default:
+		return "", fmt.Errorf("unsupported skill backend %q; use registry or local", value)
 	}
 }
 
