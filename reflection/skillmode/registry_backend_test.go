@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cloudwego/eino/adk/middlewares/skill"
 )
@@ -107,6 +108,95 @@ func TestRegistryBackendRejectsHashMismatch(t *testing.T) {
 	}
 }
 
+// TestRegistryBackendHidesDeprecatedSkillByHealthEvents 验证 registry 会用调用结果直接隔离腐化 Skill。
+func TestRegistryBackendHidesDeprecatedSkillByHealthEvents(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	store := NewMemorySkillHealthStore()
+	backend, err := NewRegistryBackend(registryTestManifest("2026-07-01.1"), RegistryBackendOptions{
+		Channel:     "prod",
+		HealthStore: store,
+		Now:         func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("NewRegistryBackend() error = %v", err)
+	}
+	recordRegistryOutcomes(t, ctx, backend, now, []SkillOutcome{
+		SkillOutcomeSuccess,
+		SkillOutcomeToolError,
+		SkillOutcomeAPIContractError,
+		SkillOutcomeLowQuality,
+		SkillOutcomeToolError,
+	})
+
+	frontMatters, err := backend.List(ctx)
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(frontMatters) != 0 {
+		t.Fatalf("front matters = %+v, want deprecated skill hidden", frontMatters)
+	}
+
+	_, err = backend.Get(ctx, "compliance_review_isolated")
+	if err == nil {
+		t.Fatal("Get() error = nil, want deprecated error")
+	}
+	if !strings.Contains(err.Error(), "deprecated") {
+		t.Fatalf("error = %v", err)
+	}
+
+	resolved, err := backend.Resolve(ctx, "compliance_review_isolated")
+	if err != nil {
+		t.Fatalf("Resolve() should remain available for audit, error = %v", err)
+	}
+	if resolved.Artifact.Version != "2026-07-01.1" {
+		t.Fatalf("resolved version = %q", resolved.Artifact.Version)
+	}
+}
+
+// TestRegistryBackendIgnoresNotApplicableInSuccessRate 验证不适用不进入失败分母，避免误伤场景型 Skill。
+func TestRegistryBackendIgnoresNotApplicableInSuccessRate(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	store := NewMemorySkillHealthStore()
+	backend, err := NewRegistryBackend(registryTestManifest("2026-07-01.1"), RegistryBackendOptions{
+		Channel:     "prod",
+		HealthStore: store,
+		HealthEvaluator: SkillHealthEvaluator{
+			Window:          24 * time.Hour,
+			MinimumSamples:  3,
+			WatchBelow:      0.90,
+			DegradedBelow:   0.60,
+			DeprecatedBelow: 0.30,
+		},
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("NewRegistryBackend() error = %v", err)
+	}
+	recordRegistryOutcomes(t, ctx, backend, now, []SkillOutcome{
+		SkillOutcomeSuccess,
+		SkillOutcomeSuccess,
+		SkillOutcomeNotApplicable,
+		SkillOutcomeNotApplicable,
+		SkillOutcomeToolError,
+	})
+
+	status, metrics, err := backend.Health(ctx, "compliance_review_isolated")
+	if err != nil {
+		t.Fatalf("Health() error = %v", err)
+	}
+	if status != SkillHealthStatusWatch {
+		t.Fatalf("status = %q, want %q", status, SkillHealthStatusWatch)
+	}
+	if metrics.EvaluableSamples != 3 {
+		t.Fatalf("evaluable samples = %d, want 3", metrics.EvaluableSamples)
+	}
+	if metrics.SuccessRate != 2.0/3.0 {
+		t.Fatalf("success rate = %.2f, want %.2f", metrics.SuccessRate, 2.0/3.0)
+	}
+}
+
 // registryTestManifest 构造带两个不可变版本和一个可切换 prod alias 的测试清单。
 func registryTestManifest(prodVersion string) SkillReleaseManifest {
 	versions := []string{"2026-07-01.1", "2026-07-01.2"}
@@ -146,4 +236,19 @@ func registrySkillBody(version string) string {
 func contentHash(content string) string {
 	sum := sha256.Sum256([]byte(content))
 	return fmt.Sprintf("%x", sum)
+}
+
+// recordRegistryOutcomes 通过 registry 记录当前 alias 版本的调用结果。
+func recordRegistryOutcomes(t *testing.T, ctx context.Context, backend *RegistryBackend, now time.Time, outcomes []SkillOutcome) {
+	t.Helper()
+	for i, outcome := range outcomes {
+		err := backend.RecordOutcome(ctx, SkillHealthEvent{
+			SkillName: "compliance_review_isolated",
+			Outcome:   outcome,
+			At:        now.Add(time.Duration(-i) * time.Minute),
+		})
+		if err != nil {
+			t.Fatalf("RecordOutcome(%d) error = %v", i, err)
+		}
+	}
 }

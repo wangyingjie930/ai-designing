@@ -87,6 +87,46 @@ func TestRunAgentUsesRegistrySkillBackend(t *testing.T) {
 	}
 }
 
+// TestRunAgentRecordsRegistrySkillOutcome 验证命令入口不只是构造 registry，还会把运行结果写回健康统计。
+func TestRunAgentRecordsRegistrySkillOutcome(t *testing.T) {
+	oldFactory := newChatModel
+	fake := &cmdSkillModeFakeModel{targetSkill: "compliance_review_isolated"}
+	newChatModel = func(context.Context, modelConfig) (model.BaseChatModel, error) {
+		return fake, nil
+	}
+	defer func() { newChatModel = oldFactory }()
+
+	store := skillmode.NewMemorySkillHealthStore()
+	oldStoreFactory := newCommandSkillHealthStore
+	newCommandSkillHealthStore = func() skillmode.SkillHealthStore {
+		return store
+	}
+	defer func() { newCommandSkillHealthStore = oldStoreFactory }()
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("LLM_MODEL", "test-model")
+	if _, err := runAgent(context.Background(), []string{
+		"-mode", "fork",
+		"-message", "客户要求客服承诺保证下月成绩提升。",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	events, err := store.List(context.Background(), skillmode.SkillHealthQuery{
+		SkillName: "compliance_review_isolated",
+		Version:   defaultRegistrySnapshotVersion,
+	})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %+v, want one success event", events)
+	}
+	if events[0].Outcome != skillmode.SkillOutcomeSuccess {
+		t.Fatalf("outcome = %q, want %q", events[0].Outcome, skillmode.SkillOutcomeSuccess)
+	}
+}
+
 // TestBuildDemoSkillReleaseManifestUsesScenarioMetadata 验证 manifest 由发布侧场景显式构造，而不是复用 local backend 扫描结果。
 func TestBuildDemoSkillReleaseManifestUsesScenarioMetadata(t *testing.T) {
 	scenarios := map[skillmode.Mode]skillmode.Scenario{

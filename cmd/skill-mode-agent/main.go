@@ -75,6 +75,11 @@ var newChatModel chatModelFactory = func(ctx context.Context, config modelConfig
 	})
 }
 
+// newCommandSkillHealthStore 创建命令入口默认健康仓库；测试可替换它来验证 registry 确实写入 outcome。
+var newCommandSkillHealthStore = func() skillmode2.SkillHealthStore {
+	return skillmode2.NewMemorySkillHealthStore()
+}
+
 // main 运行一个非 coding 的 Eino ADK Skill Middleware 模式示例 Agent。
 func main() {
 	if _, err := runAgent(context.Background(), os.Args[1:]); err != nil {
@@ -147,6 +152,12 @@ func runAgent(ctx context.Context, args []string) (runOutput, error) {
 		}
 		rawResponse, err := skillmode2.QueryRunner(traceCtx, runner, query)
 		if err != nil {
+			if recordErr := recordCommandSkillOutcome(traceCtx, skillBackend, scenario.SkillName, skillmode2.SkillOutcomeToolError); recordErr != nil {
+				return runOutput{}, recordErr
+			}
+			return runOutput{}, err
+		}
+		if err := recordCommandSkillOutcome(traceCtx, skillBackend, scenario.SkillName, skillmode2.SkillOutcomeSuccess); err != nil {
 			return runOutput{}, err
 		}
 		response := skillmode2.BuildResponse(scenario, query, rawResponse.Message)
@@ -209,10 +220,25 @@ func buildCommandSkillBackend(ctx context.Context, config runConfig) (adkskill.B
 		if err != nil {
 			return nil, err
 		}
-		return skillmode2.NewRegistryBackend(manifest, skillmode2.RegistryBackendOptions{Channel: "prod"})
+		return skillmode2.NewRegistryBackend(manifest, skillmode2.RegistryBackendOptions{
+			Channel:     "prod",
+			HealthStore: newCommandSkillHealthStore(),
+		})
 	default:
 		return nil, fmt.Errorf("unsupported skill backend %q", config.SkillBackend)
 	}
+}
+
+// recordCommandSkillOutcome 把命令级执行结果写回 registry 健康统计；local backend 没有 registry 状态，直接跳过。
+func recordCommandSkillOutcome(ctx context.Context, backend adkskill.Backend, skillName string, outcome skillmode2.SkillOutcome) error {
+	registryBackend, ok := backend.(*skillmode2.RegistryBackend)
+	if !ok || registryBackend == nil {
+		return nil
+	}
+	return registryBackend.RecordOutcome(ctx, skillmode2.SkillHealthEvent{
+		SkillName: skillName,
+		Outcome:   outcome,
+	})
 }
 
 // buildDemoSkillReleaseManifest 显式构造发布 manifest；local backend 只属于 local 运行路径。

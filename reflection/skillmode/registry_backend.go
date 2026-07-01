@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/eino/adk/middlewares/skill"
 )
@@ -38,8 +39,11 @@ type SkillAlias struct {
 
 // RegistryBackendOptions 控制运行时从哪个环境和租户视角解析 alias。
 type RegistryBackendOptions struct {
-	Channel string
-	Tenant  string
+	Channel         string
+	Tenant          string
+	HealthStore     SkillHealthStore
+	HealthEvaluator SkillHealthEvaluator
+	Now             func() time.Time
 }
 
 // ResolvedSkill 保留运行时留证需要的 alias、artifact 和 Eino Skill 结果。
@@ -51,10 +55,13 @@ type ResolvedSkill struct {
 
 // RegistryBackend 用 release manifest 实现 Eino skill.Backend，隔离发布治理和 middleware 执行。
 type RegistryBackend struct {
-	channel   string
-	tenant    string
-	artifacts map[string]map[string]SkillArtifact
-	aliases   map[registryAliasKey]SkillAlias
+	channel         string
+	tenant          string
+	artifacts       map[string]map[string]SkillArtifact
+	aliases         map[registryAliasKey]SkillAlias
+	healthStore     SkillHealthStore
+	healthEvaluator SkillHealthEvaluator
+	now             func() time.Time
 }
 
 // registryAliasKey 用环境和租户限定 alias 范围，避免不同灰度流量互相覆盖。
@@ -67,11 +74,18 @@ type registryAliasKey struct {
 // NewRegistryBackend 从发布清单构造 registry-backed Skill backend。
 func NewRegistryBackend(manifest SkillReleaseManifest, options RegistryBackendOptions) (*RegistryBackend, error) {
 	channel := normalizeRegistryChannel(options.Channel)
+	now := options.Now
+	if now == nil {
+		now = time.Now
+	}
 	backend := &RegistryBackend{
-		channel:   channel,
-		tenant:    strings.TrimSpace(options.Tenant),
-		artifacts: map[string]map[string]SkillArtifact{},
-		aliases:   map[registryAliasKey]SkillAlias{},
+		channel:         channel,
+		tenant:          strings.TrimSpace(options.Tenant),
+		artifacts:       map[string]map[string]SkillArtifact{},
+		aliases:         map[registryAliasKey]SkillAlias{},
+		healthStore:     options.HealthStore,
+		healthEvaluator: normalizeSkillHealthEvaluator(options.HealthEvaluator),
+		now:             now,
 	}
 	if err := backend.indexArtifacts(manifest.Artifacts); err != nil {
 		return nil, err
@@ -91,6 +105,13 @@ func (b *RegistryBackend) List(ctx context.Context) ([]skill.FrontMatter, error)
 		if err != nil {
 			return nil, err
 		}
+		deprecated, err := b.isResolvedSkillDeprecated(ctx, resolved)
+		if err != nil {
+			return nil, err
+		}
+		if deprecated {
+			continue
+		}
 		matters = append(matters, resolved.Skill.FrontMatter)
 	}
 	return matters, nil
@@ -101,6 +122,13 @@ func (b *RegistryBackend) Get(ctx context.Context, name string) (skill.Skill, er
 	resolved, err := b.Resolve(ctx, name)
 	if err != nil {
 		return skill.Skill{}, err
+	}
+	status, metrics, err := b.healthForResolved(ctx, resolved)
+	if err != nil {
+		return skill.Skill{}, err
+	}
+	if status == SkillHealthStatusDeprecated {
+		return skill.Skill{}, fmt.Errorf("skill %s@%s is deprecated: success_rate=%.2f samples=%d", resolved.Alias.SkillName, resolved.Artifact.Version, metrics.SuccessRate, metrics.EvaluableSamples)
 	}
 	return resolved.Skill, nil
 }
@@ -132,6 +160,37 @@ func (b *RegistryBackend) Resolve(_ context.Context, name string) (ResolvedSkill
 		Alias:    alias,
 		Artifact: artifact,
 	}, nil
+}
+
+// RecordOutcome 记录当前 alias/version 的调用结果，供 registry 后续判断 Skill 是否腐化。
+func (b *RegistryBackend) RecordOutcome(ctx context.Context, event SkillHealthEvent) error {
+	if b == nil {
+		return fmt.Errorf("registry backend is nil")
+	}
+	if b.healthStore == nil {
+		return fmt.Errorf("skill health store is not configured")
+	}
+	resolved, err := b.Resolve(ctx, event.SkillName)
+	if err != nil {
+		return err
+	}
+	event.SkillName = resolved.Alias.SkillName
+	if strings.TrimSpace(event.Version) == "" {
+		event.Version = resolved.Artifact.Version
+	}
+	if strings.TrimSpace(event.Alias) == "" {
+		event.Alias = registryAliasLabel(resolved.Alias)
+	}
+	return b.healthStore.Record(ctx, event)
+}
+
+// Health 返回当前 alias/version 的健康状态和窗口指标。
+func (b *RegistryBackend) Health(ctx context.Context, skillName string) (SkillHealthStatus, SkillHealthMetrics, error) {
+	resolved, err := b.Resolve(ctx, skillName)
+	if err != nil {
+		return "", SkillHealthMetrics{}, err
+	}
+	return b.healthForResolved(ctx, resolved)
 }
 
 // indexArtifacts 校验 artifact 内容哈希并建立 name/version 索引。
@@ -238,6 +297,35 @@ func (b *RegistryBackend) lookupArtifact(skillName string, version string) (Skil
 	}
 	artifact, ok := versions[version]
 	return artifact, ok
+}
+
+// healthForResolved 用当前 alias 解析结果查询健康状态；未配置 store 时默认健康。
+func (b *RegistryBackend) healthForResolved(ctx context.Context, resolved ResolvedSkill) (SkillHealthStatus, SkillHealthMetrics, error) {
+	if b == nil || b.healthStore == nil {
+		return SkillHealthStatusHealthy, SkillHealthMetrics{}, nil
+	}
+	return b.healthEvaluator.Evaluate(ctx, b.healthStore, SkillHealthQuery{
+		SkillName: resolved.Alias.SkillName,
+		Version:   resolved.Artifact.Version,
+		Now:       b.now(),
+	})
+}
+
+// isResolvedSkillDeprecated 把健康状态判断封装起来，避免 List/Get 分支散落。
+func (b *RegistryBackend) isResolvedSkillDeprecated(ctx context.Context, resolved ResolvedSkill) (bool, error) {
+	status, _, err := b.healthForResolved(ctx, resolved)
+	if err != nil {
+		return false, err
+	}
+	return status == SkillHealthStatusDeprecated, nil
+}
+
+// registryAliasLabel 记录事件来源时保留 channel/tenant 视角，方便后续审计。
+func registryAliasLabel(alias SkillAlias) string {
+	if strings.TrimSpace(alias.Tenant) != "" {
+		return alias.Channel + "/" + alias.Tenant
+	}
+	return alias.Channel
 }
 
 // normalizeRegistryChannel 统一空 channel 语义，避免 alias 解析时出现双重默认值。
