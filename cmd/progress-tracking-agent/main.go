@@ -20,6 +20,8 @@ const (
 	defaultEnvPath             = ".env"
 	dbEnvKey                   = "PROGRESS_TRACKING_DB"
 	planIDEnvKey               = "PROGRESS_TRACKING_PLAN_ID"
+	messageEnvKey              = "PROGRESS_TRACKING_MESSAGE"
+	messageFileEnvKey          = "PROGRESS_TRACKING_MESSAGE_FILE"
 	generatedPlanTriggerRounds = 3
 )
 
@@ -122,7 +124,7 @@ func runAgent(ctx context.Context, args []string) (runOutput, error) {
 		if err != nil {
 			return runOutput{}, fmt.Errorf("init chat model: %w", err)
 		}
-		agent, err := progresstracking.NewEventPlanningAgent(traceCtx, progresstracking.AgentConfig{
+		baseAgent, err := progresstracking.NewEventPlanningAgent(traceCtx, progresstracking.AgentConfig{
 			Model:         chatModel,
 			Tracker:       tracker,
 			MaxIterations: 10,
@@ -130,6 +132,15 @@ func runAgent(ctx context.Context, args []string) (runOutput, error) {
 		if err != nil {
 			return runOutput{}, err
 		}
+		agent, longTracker, err := buildLongHorizonAgent(traceCtx, tracker, baseAgent)
+		if err != nil {
+			return runOutput{}, err
+		}
+		defer func() {
+			if err := longTracker.Close(); err != nil {
+				fmt.Fprintf(os.Stderr, "warn: close long horizon tracker: %v\n", err)
+			}
+		}()
 		response, err := agent.Query(traceCtx, progresstracking.AgentRequest{Message: config.Message})
 		if err != nil {
 			return runOutput{}, err
@@ -153,6 +164,39 @@ func runAgent(ctx context.Context, args []string) (runOutput, error) {
 	})
 }
 
+// buildLongHorizonAgent 给真实 Agent 套上 v2 长任务控制层，让运行时自动写锚、账本和机械态。
+func buildLongHorizonAgent(ctx context.Context, tracker *progresstracking.ProgressTracker, base agentQuerier) (*progresstracking.LongHorizonEventPlanningAgent, *progresstracking.LongHorizonTracker, error) {
+	if tracker == nil {
+		return nil, nil, fmt.Errorf("progress tracker is required")
+	}
+	longTracker, err := progresstracking.NewLongHorizonTracker(ctx, progresstracking.LongHorizonConfig{
+		DBPath: tracker.Path(),
+		TaskID: buildLongHorizonTaskID(tracker.PlanID()),
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	wrapped, err := progresstracking.NewLongHorizonEventPlanningAgent(progresstracking.LongHorizonAgentConfig{
+		Base:            base,
+		ProgressTracker: tracker,
+		LongTracker:     longTracker,
+	})
+	if err != nil {
+		_ = longTracker.Close()
+		return nil, nil, err
+	}
+	return wrapped, longTracker, nil
+}
+
+// buildLongHorizonTaskID 让 v1 plan 和 v2 长任务共享业务前缀，但避免写到同一个状态命名空间。
+func buildLongHorizonTaskID(planID string) string {
+	planID = strings.TrimSpace(planID)
+	if planID == "" {
+		planID = "default"
+	}
+	return planID + ":v2"
+}
+
 // parseRunConfig 读取 flags、.env 和输入文件，所有运行参数都从外部传入。
 func parseRunConfig(args []string) (runConfig, error) {
 	fs := flag.NewFlagSet("progress-tracking-agent", flag.ContinueOnError)
@@ -171,8 +215,8 @@ func parseRunConfig(args []string) (runConfig, error) {
 	}
 	fs.StringVar(&dbPath, "db", "", "SQLite path; fallback env PROGRESS_TRACKING_DB")
 	fs.StringVar(&planID, "plan-id", "", "plan id; fallback env PROGRESS_TRACKING_PLAN_ID")
-	fs.StringVar(&message, "message", "", "natural language event-planning message for the ADK agent")
-	fs.StringVar(&messageFile, "message-file", "", "file containing the natural language message")
+	fs.StringVar(&message, "message", "", "natural language event-planning message for the ADK agent; fallback env PROGRESS_TRACKING_MESSAGE")
+	fs.StringVar(&messageFile, "message-file", "", "file containing the natural language message; fallback env PROGRESS_TRACKING_MESSAGE_FILE")
 	fs.BoolVar(&config.PrepareOnly, "prepare-only", false, "only update/read SQLite tracker without calling model")
 	fs.StringVar(&itemsText, "items", "", "prepare-only task list as JSON array, newline text, or semicolon-separated text")
 	fs.StringVar(&itemsFile, "items-file", "", "prepare-only task list file")
@@ -195,6 +239,10 @@ func parseRunConfig(args []string) (runConfig, error) {
 	}
 	config.PlanID = firstNonEmpty(planID, os.Getenv(planIDEnvKey))
 	config.Message = strings.TrimSpace(message)
+	if config.Message == "" && strings.TrimSpace(messageFile) == "" {
+		config.Message = strings.TrimSpace(os.Getenv(messageEnvKey))
+		messageFile = strings.TrimSpace(os.Getenv(messageFileEnvKey))
+	}
 	if messageFile != "" {
 		content, err := os.ReadFile(e2etest.ResolvePath(messageFile))
 		if err != nil {

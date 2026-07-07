@@ -19,7 +19,7 @@ const (
 // Valid 判断状态是否属于 progress tracker 支持的闭集。
 func (s TaskStatus) Valid() bool {
 	switch s {
-	case TaskStatusPending, TaskStatusInProgress, TaskStatusCompleted, TaskStatusFailed:
+	case TaskStatusPending, TaskStatusInProgress, TaskStatusCompleted, TaskStatusFailed, TaskStatusBlocked, TaskStatusNeedsReview, TaskStatusNeedsRework:
 		return true
 	default:
 		return false

@@ -33,6 +33,26 @@ func (a *planTriggerFakeAgent) Query(ctx context.Context, req progresstracking.A
 	return &progresstracking.AgentResponse{Message: result}, nil
 }
 
+type longHorizonCommandFakeAgent struct {
+	tracker *progresstracking.ProgressTracker
+}
+
+// Query 模拟命令入口里的真实 Agent：它仍然通过 v1 tracker 写状态，由 v2 wrapper 观察差异。
+func (a *longHorizonCommandFakeAgent) Query(ctx context.Context, req progresstracking.AgentRequest) (*progresstracking.AgentResponse, error) {
+	if len(a.tracker.Items()) == 0 {
+		if err := a.tracker.CreatePlan(ctx, []string{"确认场地合同和容量"}); err != nil {
+			return nil, err
+		}
+	}
+	if err := a.tracker.Start(ctx, 0); err != nil {
+		return nil, err
+	}
+	if err := a.tracker.Complete(ctx, 0, "场地可容纳 80 人", []string{"venue-contract.pdf"}); err != nil {
+		return nil, err
+	}
+	return &progresstracking.AgentResponse{Message: "场地已确认"}, nil
+}
+
 // TestTriggerGeneratedPlanRounds 验证主流程会查询生成计划，并只触发前三个未完成任务。
 func TestTriggerGeneratedPlanRounds(t *testing.T) {
 	ctx := context.Background()
@@ -64,6 +84,42 @@ func TestTriggerGeneratedPlanRounds(t *testing.T) {
 	}
 	if items[3].Status != progresstracking.TaskStatusPending {
 		t.Fatalf("item 3 status = %s, want pending", items[3].Status)
+	}
+}
+
+// TestBuildLongHorizonAgentWrapsCommandAgent 验证 cmd 正常链路会把 Agent 的 v1 进度变化写进 v2 账本。
+func TestBuildLongHorizonAgentWrapsCommandAgent(t *testing.T) {
+	ctx := context.Background()
+	tracker, err := progresstracking.NewProgressTracker(ctx, progresstracking.Config{
+		DBPath: filepath.Join(t.TempDir(), "progress.sqlite"),
+		PlanID: "event-demo",
+	})
+	if err != nil {
+		t.Fatalf("NewProgressTracker() error = %v", err)
+	}
+	defer tracker.Close()
+	base := &longHorizonCommandFakeAgent{tracker: tracker}
+	wrapped, longTracker, err := buildLongHorizonAgent(ctx, tracker, base)
+	if err != nil {
+		t.Fatalf("buildLongHorizonAgent() error = %v", err)
+	}
+	defer longTracker.Close()
+	response, err := wrapped.Query(ctx, progresstracking.AgentRequest{Message: "筹备 80 人线下读书会"})
+	if err != nil {
+		t.Fatalf("Query() error = %v", err)
+	}
+	if !strings.Contains(response.Message, "V2 checkpoint") {
+		t.Fatalf("response missing v2 checkpoint:\n%s", response.Message)
+	}
+	packet, err := longTracker.ResumePacket(ctx)
+	if err != nil {
+		t.Fatalf("ResumePacket() error = %v", err)
+	}
+	if packet.Goal.GoalID != "event-demo:v2" {
+		t.Fatalf("v2 goal id = %q", packet.Goal.GoalID)
+	}
+	if len(packet.RecentLedger) == 0 {
+		t.Fatal("v2 ledger is empty")
 	}
 }
 
@@ -150,6 +206,24 @@ func TestPrepareOnlyCreatesAndUpdatesPlan(t *testing.T) {
 	}
 	if output.Items != 2 {
 		t.Fatalf("output = %+v", output)
+	}
+}
+
+// TestParseRunConfigReadsMessageFileFromEnv 验证正常 Agent 路径的用户目标也可以由 .env 托管。
+func TestParseRunConfigReadsMessageFileFromEnv(t *testing.T) {
+	t.Chdir(t.TempDir())
+	messageFile := filepath.Join(t.TempDir(), "goal.txt")
+	if err := os.WriteFile(messageFile, []byte("筹备 80 人线下读书会"), 0o644); err != nil {
+		t.Fatalf("write message file: %v", err)
+	}
+	t.Setenv("PROGRESS_TRACKING_MESSAGE_FILE", messageFile)
+
+	config, err := parseRunConfig([]string{"-db", filepath.Join(t.TempDir(), "progress.sqlite")})
+	if err != nil {
+		t.Fatalf("parseRunConfig() error = %v", err)
+	}
+	if config.Message != "筹备 80 人线下读书会" {
+		t.Fatalf("message = %q", config.Message)
 	}
 }
 
