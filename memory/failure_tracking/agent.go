@@ -51,15 +51,15 @@ type AgentResponse struct {
 	Message string `json:"message"`
 }
 
-// NewSearchFailuresTool 创建“行动前搜索相似失败经验”的 ADK 工具。
+// NewSearchFailuresTool 创建“行动前按结构化键召回失败经验”的 ADK 工具。
 func NewSearchFailuresTool(journal *FailureJournal) (tool.BaseTool, error) {
 	if journal == nil {
 		return nil, errors.New("failure journal is required")
 	}
 	toolset := Toolset{Journal: journal}
-	return toolutils.InferTool[ConsultRequest, *ConsultResponse](
+	return toolutils.InferTool[RecallRequest, *RecallResponse](
 		SearchFailuresToolName,
-		"在行动前查询相似失败经验。输入 current_context 和可选 top_k，返回 score>=0.7 的经验。",
+		"在任务启动、规划或高风险工具调用前召回 approved 失败经验。优先填写 task_family、tool、mechanical_keys、categories；query 只作语义辅助。",
 		toolset.Search,
 	)
 }
@@ -72,17 +72,17 @@ func NewRecordFailureTool(journal *FailureJournal) (tool.BaseTool, error) {
 	toolset := Toolset{Journal: journal}
 	return toolutils.InferTool[RecordRequest, *RecordResponse](
 		RecordFailureToolName,
-		"把当前失败沉淀为 append-only 经验。仅当 context、error、fix 都明确时调用。",
+		"把当前失败沉淀为六层失败日记。必须拆分 symptom、root_cause、repair、lesson、do_not、evidence、recall；只有明确出现外部审查/批准来源时才能把 status 填为 approved。",
 		toolset.Record,
 	)
 }
 
-// Search 是 search tool 的执行边界，只负责读取历史失败经验。
-func (t Toolset) Search(ctx context.Context, req ConsultRequest) (*ConsultResponse, error) {
+// Search 是 search tool 的执行边界，只负责读取 approved 历史失败经验。
+func (t Toolset) Search(ctx context.Context, req RecallRequest) (*RecallResponse, error) {
 	if t.Journal == nil {
 		return nil, errors.New("failure journal is required")
 	}
-	return t.Journal.Consult(ctx, req)
+	return t.Journal.RecallBeforeTool(ctx, req)
 }
 
 // Record 是 record tool 的执行边界，只负责追加一条新的失败经验。
@@ -163,9 +163,11 @@ func (a *Agent) Query(ctx context.Context, req AgentRequest) (*AgentResponse, er
 	query := strings.Join([]string{
 		"请处理下面这条酒店运营消息。",
 		"你必须自己决定是否以及如何调用工具，不要等待外部代码替你查询或记录。",
-		"每轮行动前必须先调用 " + SearchFailuresToolName + "，current_context 用当前消息中的自然语言事实概括。",
-		"如果 search 没有返回可复用经验，并且当前消息包含已验证的失败现象、失败原因/错误类别和最终修复动作，必须调用 " + RecordFailureToolName + " 沉淀新经验。",
-		"如果 search 返回了相似经验，必须优先复用其中的 fix/heuristic；除非当前消息出现新的已验证差异，不要重复 record。",
+		"每轮行动前必须先调用 " + SearchFailuresToolName + "，task_family 用当前业务任务族；tool 和 mechanical_keys 只能来自真实工具调用或 SessionState 绑定。",
+		"没有真实工具调用或 SessionState 绑定时，不要填写 tool 或 mechanical_keys；这时只填写 task_family、categories 和 query 做弱召回。",
+		"如果 search 没有返回可复用经验，并且当前消息包含已验证失败、根因、修复动作和明确审查来源，必须调用 " + RecordFailureToolName + " 沉淀六层失败日记。",
+		"记录时要拆分 boundary、category、symptom、root_cause、repair、lesson、do_not、evidence、recall。没有明确审查来源时只能写 draft 或 needs_review，不能写 approved。",
+		"如果 search 返回了相似经验，必须把 lesson/do_not 当作边界提醒，并结合当前事实重新核验；除非当前消息出现新的已验证差异，不要重复 record。",
 		"最终答复请给出：已检索到的历史经验是否命中、当前处置建议、是否沉淀了新经验。",
 		"",
 		string(payload),
@@ -205,10 +207,13 @@ func (a *Agent) Query(ctx context.Context, req AgentRequest) (*AgentResponse, er
 func DefaultHotelRecoveryInstruction() string {
 	return strings.Join([]string{
 		"你是一个酒店运营 Agent，负责处理客诉、房态、值班经理升级和内部复盘。",
-		"每次回答前必须先调用 failure_tracking_search，确认是否有相似失败经验。",
-		"如果当前消息是已解决复盘，并且包含失败现象、错误类别或失败原因、最终修复动作，这就是可沉淀的新经验；当 search 没有命中时必须调用 failure_tracking_record。",
-		"如果当前消息是新客诉或现场处置请求，必须先复用 search 返回的历史 fix/heuristic，再给处置建议。",
-		"不要记录猜测、未验证方案、单纯情绪或没有修复动作的事件。",
+		"每次回答前必须先调用 failure_tracking_search，按 task_family、tool、mechanical_keys、categories 查询 approved 失败经验。",
+		"没有真实工具调用或 SessionState 绑定时，不要填写 tool 或 mechanical_keys；不要把业务名词包装成机械状态键。",
+		"如果当前消息是已解决且已审查的复盘，并且包含失败现象、根因、修复动作和召回条件，这就是可沉淀的新经验；当 search 没有命中时必须调用 failure_tracking_record。",
+		"记录失败经验时必须包含六层结构：失败边界、失败分类、证据包、根因与补救、召回触发器、留存与审查。",
+		"状态只能在明确出现外部审查来源时写 approved；否则写 draft 或 needs_review，避免未经确认的经验进入召回库。",
+		"如果当前消息是新客诉或现场处置请求，必须先复用 search 返回的 lesson/do_not，再结合当前房态、库存和审批事实给处置建议。",
+		"不要记录猜测、未验证方案、单纯情绪或没有修复动作的事件；召回经验只是风险提醒，不能替代当前事实。",
 		"回答要面向酒店运营人员：说明是否命中历史经验、建议动作、升级边界、以及是否新记录了经验。",
 	}, "\n")
 }

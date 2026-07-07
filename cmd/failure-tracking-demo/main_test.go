@@ -21,6 +21,20 @@ func TestDefaultBusinessMessagesShape(t *testing.T) {
 	if !strings.Contains(messages[1], "现场求助") || strings.Contains(messages[1], "修复动作") {
 		t.Fatalf("second message should be a live request without a baked-in fix, got %q", messages[1])
 	}
+	joined := strings.Join(messages, "\n")
+	for _, fabricatedKey := range []string{
+		"assign_room_or_compensation",
+		"pms_room_status",
+		"housekeeping_room_status",
+		"room_inventory",
+		"compensation_approval",
+		"mechanical_keys=",
+		"tool=",
+	} {
+		if strings.Contains(joined, fabricatedKey) {
+			t.Fatalf("default business messages should not seed fabricated recall key %q; messages=%s", fabricatedKey, joined)
+		}
+	}
 }
 
 // TestResolveDBPathFromEnv 验证外部需要持久 SQLite 时只需设置环境变量，不需要业务参数。

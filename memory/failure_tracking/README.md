@@ -1,20 +1,29 @@
 # Failure Tracking
 
-这个目录把 Python `FailureJournal` 翻译成 Go + Eino ADK 版本，并作为正常业务 Agent 的工具能力使用。
+这个目录实现《失败日记：让 Agent 把摔过的跤变成本事》里的 Failure Journals 模式，并把它作为 Eino ADK Agent 的工具能力使用。
 
 核心对应关系：
 
-- `FailureEntry` -> [types.go](types.go)
-- `FailureJournal.record` -> [journal.go](journal.go) 的 `Record`
-- `FailureJournal.consult` -> [journal.go](journal.go) 的 `Consult`
-- `llm.generate(...)` -> [generator.go](generator.go) 的 `ModelLessonGenerator`
-- `vector_db.upsert/search` -> [sqlite_store.go](sqlite_store.go) 的 SQLite + `embedding_json`
-- ADK tools / Agent -> [agent.go](agent.go)
+- 失败边界 `Boundary`：`hard_failure` / `gate_failure` / `semantic_failure` / `safety_failure`
+- 失败分类 `Category`：`tool_failure`、`mechanical_state_mismatch`、`boundary_leak` 等可召回类别
+- 证据包 `EvidenceBundle`：`workspace_refs`、`narrative_refs`、`state_refs`、`observation_refs`
+- 根因与补救：`symptom`、`root_cause`、`repair`、`lesson`、`do_not`
+- 召回触发器 `RecallTrigger`：`task_families`、`tools`、`mechanical_keys`、`categories`
+- 留存与审查 `Status`：`draft`、`needs_review`、`approved`、`archived`
+
+实现要点：
+
+- `FailureJournal.Record` 写入完整六层结构，不能只写一段错误故事。
+- `FailureJournal.RecallBeforeTool` 只召回 `approved` 条目。
+- 召回排序优先使用结构化键：`task_family + tool + mechanical_keys + categories`；embedding/关键词只做辅助排序。
+- ADK 工具通过 Eino `InferTool` 从 Go struct tags 生成 JSON Schema，`required`、`enum` 和字段说明都写在 `types.go`。
+- SQLite 仍是唯一持久化路径，完整条目保存到 `entry_json`，向量保存到 `embedding_json`。
+- `recalled_count` 会在每次命中后递增，方便后续统计召回有效率、漏召回率等指标。
 
 业务复现场景是酒店运营 Agent 的两轮自然语言消息：
 
-1. 第一轮是一条已解决的值班复盘。消息只以自然语言描述失败现象、原因和修复动作；Agent 必须先调用 `failure_tracking_search`，因为没有相似经验，再自主调用 `failure_tracking_record` 沉淀经验。
-2. 第二轮是一条新的现场求助。消息不包含最终修复动作；Agent 必须先调用 `failure_tracking_search`，从第一轮沉淀的 journal 里召回经验，再给处置建议。
+1. 第一轮是一条已解决且已由值班经理审查的复盘。Agent 必须先调用 `failure_tracking_search`，没有相似经验时再调用 `failure_tracking_record` 写入 approved 失败日记。
+2. 第二轮是一条新的现场求助。Agent 必须先调用 `failure_tracking_search`，优先用真实任务族、失败类别和 query 召回上一轮经验；没有真实工具调用或 SessionState 绑定时，不允许编造 `tool` 或 `mechanical_keys`。
 
 运行：
 

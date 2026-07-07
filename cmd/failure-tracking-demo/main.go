@@ -84,9 +84,8 @@ func runAgent(ctx context.Context) (runAgentTraceOutput, error) {
 			return runAgentTraceOutput{}, fmt.Errorf("init chat model: %w", err)
 		}
 		journal, err := failuretracking.NewFailureJournal(traceCtx, failuretracking.Config{
-			DBPath:    dbPath,
-			Generator: failuretracking.NewModelLessonGenerator(chatModel),
-			Embedder:  embedder,
+			DBPath:   dbPath,
+			Embedder: embedder,
 		})
 		if err != nil {
 			return runAgentTraceOutput{}, err
@@ -134,10 +133,11 @@ func runAgent(ctx context.Context) (runAgentTraceOutput, error) {
 func defaultBusinessMessages() []string {
 	return []string{
 		strings.Join([]string{
-			"值班复盘：昨晚 23:40，A 座 1208 的客人到店后等了 32 分钟。",
+			"值班复盘：昨晚 23:40，A 座 1208 的客人到店后等了 32 分钟。值班经理已经复核并批准这条经验进入失败日记召回库，reviewed_by=night-manager-li。",
 			"失败现象是 PMS 仍显示 dirty，但 housekeeping app 已显示 clean；前台连续两次口头承诺“再等 10 分钟”，没有切换房间，客诉升级到值班经理。",
 			"最终确认是 PMS 房态同步队列卡住，housekeeping 的 clean 事件没有写回 PMS。",
 			"修复动作：先核对两个系统的更新时间戳；如果 5 分钟内不同步，立即安排同房型空房，同房型不足就升级高一档房型，并给早餐券或延迟退房；房费减免必须让值班经理确认。",
+			"这条复盘没有真实工具调用记录或 SessionState 键；不能编造 tool 或 mechanical_keys，只能基于任务族、失败类别和自然语言事实做弱召回。",
 			"请按酒店运营流程处理这条复盘。",
 		}, "\n"),
 		strings.Join([]string{
