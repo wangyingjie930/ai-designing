@@ -131,14 +131,14 @@ type Config struct {
 
 // WriteRequest 是写入记忆的 ADK tool 输入，value 用对象承载，避免模型传入不稳定标量 schema。
 type WriteRequest struct {
-	Key           string         `json:"key"`
-	Value         map[string]any `json:"value"`
-	Layer         MemoryLayer    `json:"layer"`
-	Source        MemorySource   `json:"source"`
-	EvidenceRefs  []string       `json:"evidence_refs,omitempty"`
-	Confidence    *float64       `json:"confidence,omitempty"`
-	TokenEstimate int            `json:"token_estimate,omitempty"`
-	ValidUntil    string         `json:"valid_until,omitempty"`
+	Key           string         `json:"key" jsonschema:"required" jsonschema_description:"稳定业务键；更新同一个偏好、项目或任务时必须复用已有 key 做 upsert"`
+	Value         map[string]any `json:"value" jsonschema:"required" jsonschema_description:"结构化记忆内容，必须是 JSON object，避免把不稳定标量直接写入长期记忆"`
+	Layer         MemoryLayer    `json:"layer" jsonschema:"required,enum=policy,enum=project,enum=user,enum=task,enum=scratchpad" jsonschema_description:"目标记忆层：policy/project/user/task/scratchpad；未验证推断只能先写 scratchpad"`
+	Source        MemorySource   `json:"source" jsonschema:"required,enum=human,enum=tool,enum=agent_inference,enum=verified_trace,enum=failure_review" jsonschema_description:"记忆来源；policy/project 不接受 agent_inference 直接写入"`
+	EvidenceRefs  []string       `json:"evidence_refs,omitempty" jsonschema_description:"证据引用，例如 user:round-2-confirmed 或 tool:inventory-check-001；需要证据的层必须填写可信来源或证据"`
+	Confidence    *float64       `json:"confidence,omitempty" jsonschema:"minimum=0,maximum=1,default=1" jsonschema_description:"置信度，范围 0 到 1；不填时按 1.0 处理"`
+	TokenEstimate int            `json:"token_estimate,omitempty" jsonschema:"minimum=0" jsonschema_description:"这条记忆预计占用的 token 数，用于 assemble_context 的层预算选择"`
+	ValidUntil    string         `json:"valid_until,omitempty" jsonschema_description:"可选过期时间，使用 RFC3339/ISO 时间；长期稳定事实通常留空"`
 }
 
 // WriteResponse 返回实际写入后的完整 MemoryEntry。
@@ -146,14 +146,14 @@ type WriteResponse struct {
 	Entry MemoryEntry `json:"entry"`
 }
 
-// ProposeScratchpadRequest 是 scratchpad 提升候选生成工具的输入。
-type ProposeScratchpadRequest struct {
-	Key         string      `json:"key"`
-	TargetLayer MemoryLayer `json:"target_layer"`
+// PromoteScratchpadRequest 是 scratchpad 提升工具的输入；正式层级由工程代码根据 key 路由。
+type PromoteScratchpadRequest struct {
+	Key          string   `json:"key" jsonschema:"required" jsonschema_description:"要提升的 scratchpad key；工程代码会根据稳定 key 前缀决定正式层级"`
+	EvidenceRefs []string `json:"evidence_refs" jsonschema:"required" jsonschema_description:"本次提升新增的证据引用；必须证明 scratchpad 内容已经被用户、工具或审查链路确认"`
 }
 
-// ProposeScratchpadResponse 返回从 scratchpad 生成的 verified_trace 候选记忆。
-type ProposeScratchpadResponse struct {
+// PromoteScratchpadResponse 返回已写回正式层的 verified_trace 记忆。
+type PromoteScratchpadResponse struct {
 	Entry MemoryEntry `json:"entry"`
 }
 

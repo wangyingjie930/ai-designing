@@ -16,7 +16,7 @@ import (
 
 const (
 	WriteMemoryToolName       = "hierarchical_v1_write_memory"
-	ProposeScratchpadToolName = "hierarchical_v1_propose_scratchpad"
+	PromoteScratchpadToolName = "hierarchical_v1_promote_scratchpad"
 	AssembleContextToolName   = "hierarchical_v1_assemble_context"
 	HealthReportToolName      = "hierarchical_v1_health_report"
 )
@@ -44,16 +44,16 @@ func NewWriteMemoryTool(memory *HierarchicalMemory) (tool.BaseTool, error) {
 	)
 }
 
-// NewProposeScratchpadTool 创建“从 scratchpad 生成目标层候选”的 ADK 工具。
-func NewProposeScratchpadTool(memory *HierarchicalMemory) (tool.BaseTool, error) {
+// NewPromoteScratchpadTool 创建“把已验证 scratchpad 写回正式层”的 ADK 工具。
+func NewPromoteScratchpadTool(memory *HierarchicalMemory) (tool.BaseTool, error) {
 	if memory == nil {
 		return nil, errors.New("hierarchical memory is required")
 	}
 	toolset := Toolset{Memory: memory}
-	return toolutils.InferTool[ProposeScratchpadRequest, *ProposeScratchpadResponse](
-		ProposeScratchpadToolName,
-		"把 scratchpad 里的临时条目转换成 verified_trace 来源的目标层候选；该工具只 propose，不会自动写入目标层。",
-		toolset.ProposeScratchpad,
+	return toolutils.InferTool[PromoteScratchpadRequest, *PromoteScratchpadResponse](
+		PromoteScratchpadToolName,
+		"把已被证据确认的 scratchpad 条目提升为 verified_trace 记忆并写回正式层；目标层由工程代码根据 key 前缀决定，模型不能传 target_layer。",
+		toolset.PromoteScratchpad,
 	)
 }
 
@@ -91,12 +91,12 @@ func (t Toolset) WriteMemory(ctx context.Context, req WriteRequest) (*WriteRespo
 	return t.Memory.Write(ctx, req)
 }
 
-// ProposeScratchpad 是 scratchpad promotion tool 的执行边界，只生成候选条目。
-func (t Toolset) ProposeScratchpad(ctx context.Context, req ProposeScratchpadRequest) (*ProposeScratchpadResponse, error) {
+// PromoteScratchpad 是 scratchpad promotion tool 的执行边界，只接收 key 和证据，层级由工程代码决定。
+func (t Toolset) PromoteScratchpad(ctx context.Context, req PromoteScratchpadRequest) (*PromoteScratchpadResponse, error) {
 	if t.Memory == nil {
 		return nil, errors.New("hierarchical memory is required")
 	}
-	return t.Memory.ProposeScratchpadByKey(ctx, req)
+	return t.Memory.PromoteScratchpadByKey(ctx, req)
 }
 
 // AssembleContext 是 context tool 的执行边界，只负责选择当前可见记忆。
@@ -187,7 +187,7 @@ func (a *Agent) Query(ctx context.Context, req AgentRequest) (*AgentResponse, er
 		"推荐 task key 形态：task:<稳定业务对象>，例如 task:current_week_family_dinner_plan；project/user 也要使用能跨轮复用的稳定 key。",
 		"低频写入：长期偏好、稳定禁忌、跨会话家庭事实，只在用户明确表达或有证据时写 user；当前周计划的预算、天数、目标和项目边界，只在明确确认时写 project。",
 		"不要只等最后一轮才写关键 task 状态；每轮结束前做一次轻量兜底，检查是否有已确认但尚未写入的 user/project/task 事实。",
-		"如果 scratchpad 条目已经被证据验证，先调用 " + ProposeScratchpadToolName + " 生成 verified_trace 候选，再调用 " + WriteMemoryToolName + " 写入目标层。",
+		"如果 scratchpad 条目已经被证据验证，调用 " + PromoteScratchpadToolName + " 并提供 evidence_refs；正式层级由工程代码根据 key 前缀决定。",
 		"最终答复要说明：用了哪些记忆层、是否写入新记忆、哪些内容仍留在 scratchpad 待验证。",
 		"",
 		string(payload),
@@ -233,7 +233,7 @@ func DefaultMealPlanningInstruction() string {
 		"更新同一任务或同一项目时必须复用 assemble_context.entries 里的已有 key；状态、进度、约束和产出变化都写入同一个 key 的 value。",
 		"只有业务对象真的不同才创建新 key；不要用 started/completed/progress 这类状态词派生新的 task key。",
 		"一般状态批量写：长期偏好写 user，当前项目规则写 project，但必须是明确表达或带证据的稳定事实。",
-		"scratchpad 是临时态，不要把它当成已验证事实；只有经过 evidence 或工具/用户确认后，才通过 propose_scratchpad 生成 verified_trace 候选。",
+		"scratchpad 是临时态，不要把它当成已验证事实；只有经过 evidence 或工具/用户确认后，才通过 promote_scratchpad 写回正式层。",
 		"每轮结束前做轻量兜底：如果发现已确认的重要事实还没保存，先写入对应层再回答。",
 		"回答要面向做饭的人：给出菜单建议、采购或准备动作、依据的记忆层，以及本轮记忆写入情况。",
 	}, "\n")
@@ -253,11 +253,11 @@ func buildMemoryTools(memory *HierarchicalMemory, extraTools []tool.BaseTool) ([
 	if err != nil {
 		return nil, err
 	}
-	proposeTool, err := NewProposeScratchpadTool(memory)
+	promoteTool, err := NewPromoteScratchpadTool(memory)
 	if err != nil {
 		return nil, err
 	}
-	tools := []tool.BaseTool{assembleTool, healthTool, writeTool, proposeTool}
+	tools := []tool.BaseTool{assembleTool, healthTool, writeTool, promoteTool}
 	tools = append(tools, extraTools...)
 	return tools, nil
 }

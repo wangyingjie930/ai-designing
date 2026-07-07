@@ -44,8 +44,8 @@ type Config struct {
 
 // CreatePlanRequest 初始化或替换当前计划，items 由调用方或 Agent 动态生成。
 type CreatePlanRequest struct {
-	Items []string `json:"items"`
-	Reset bool     `json:"reset,omitempty"`
+	Items []string `json:"items" jsonschema:"required" jsonschema_description:"要初始化的可执行任务列表；每一项都应是可以被开始、完成或失败记录的具体动作"`
+	Reset bool     `json:"reset,omitempty" jsonschema_description:"只有用户明确要求重建已有计划时才传 true，避免覆盖已经写入 SQLite 的 checkpoint"`
 }
 
 // CreatePlanResponse 返回创建后的计划快照，便于 Agent 继续推理下一步。
@@ -56,20 +56,20 @@ type CreatePlanResponse struct {
 
 // StartTaskRequest 把指定任务标记为 in_progress，index 沿用 Python 的 0-based 位置。
 type StartTaskRequest struct {
-	Index int `json:"index"`
+	Index int `json:"index" jsonschema:"required,minimum=0" jsonschema_description:"要标记为 in_progress 的任务下标，使用 0-based index"`
 }
 
 // CompleteTaskRequest 对应 Python complete(index, result, files) 的输入。
 type CompleteTaskRequest struct {
-	Index  int      `json:"index"`
-	Result string   `json:"result"`
-	Files  []string `json:"files,omitempty"`
+	Index  int      `json:"index" jsonschema:"required,minimum=0" jsonschema_description:"要标记完成的任务下标，使用 0-based index"`
+	Result string   `json:"result" jsonschema:"required" jsonschema_description:"任务完成后的真实结果或证据摘要；不能留空，也不要把下一步计划当成结果"`
+	Files  []string `json:"files,omitempty" jsonschema_description:"本次任务产出的文件、材料或凭证引用，例如 venue-contract.pdf"`
 }
 
 // FailTaskRequest 对应 Python fail(index, error) 的输入。
 type FailTaskRequest struct {
-	Index int    `json:"index"`
-	Error string `json:"error"`
+	Index int    `json:"index" jsonschema:"required,minimum=0" jsonschema_description:"要标记失败的任务下标，使用 0-based index"`
+	Error string `json:"error" jsonschema:"required" jsonschema_description:"任务失败或阻塞的具体原因；用于恢复后优先处理问题"`
 }
 
 // TaskUpdateResponse 返回一次状态变更后的任务和完整恢复上下文。

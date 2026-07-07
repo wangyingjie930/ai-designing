@@ -3,6 +3,7 @@ package hierarchicalv1
 import (
 	"context"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -100,6 +101,70 @@ func TestProposeFromScratchpad(t *testing.T) {
 	}
 }
 
+// TestPromoteScratchpadByKeyRoutesAndWritesWithEvidence 验证提升由工程代码选层并真实写回正式记忆。
+func TestPromoteScratchpadByKeyRoutesAndWritesWithEvidence(t *testing.T) {
+	memory, err := NewHierarchicalMemory(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = memory.WriteEntry(MemoryEntry{
+		Key:           "user:family_prefers_early_dinner",
+		Value:         map[string]any{"text": "家庭更偏好 18:30 前开饭"},
+		Layer:         MemoryLayerScratchpad,
+		Source:        MemorySourceAgentInference,
+		EvidenceRefs:  []string{"scratch:round-1-observation"},
+		Confidence:    0.72,
+		TokenEstimate: 9,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := memory.PromoteScratchpadByKey(context.Background(), PromoteScratchpadRequest{
+		Key:          "user:family_prefers_early_dinner",
+		EvidenceRefs: []string{"user:round-2-confirmed"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Entry.Layer != MemoryLayerUser || response.Entry.Source != MemorySourceVerifiedTrace {
+		t.Fatalf("unexpected promoted entry: %+v", response.Entry)
+	}
+	if !slices.Contains(response.Entry.EvidenceRefs, "scratch:round-1-observation") ||
+		!slices.Contains(response.Entry.EvidenceRefs, "user:round-2-confirmed") {
+		t.Fatalf("promotion should merge evidence refs: %+v", response.Entry.EvidenceRefs)
+	}
+	stored, ok := memory.EntryByKey("user:family_prefers_early_dinner")
+	if !ok || stored.Layer != MemoryLayerUser {
+		t.Fatalf("promoted entry should be written back as user memory: %+v", stored)
+	}
+}
+
+// TestPromoteScratchpadByKeyRequiresEvidence 验证没有证据时不能把临时推断升级为正式记忆。
+func TestPromoteScratchpadByKeyRequiresEvidence(t *testing.T) {
+	memory, err := NewHierarchicalMemory(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = memory.WriteEntry(MemoryEntry{
+		Key:           "task:weekly_plan",
+		Value:         map[string]any{"text": "本周计划可能需要清淡菜单"},
+		Layer:         MemoryLayerScratchpad,
+		Source:        MemorySourceAgentInference,
+		TokenEstimate: 8,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = memory.PromoteScratchpadByKey(context.Background(), PromoteScratchpadRequest{
+		Key: "task:weekly_plan",
+	})
+	if err == nil || !strings.Contains(err.Error(), "promotion requires evidence") {
+		t.Fatalf("expected evidence rejection, got %v", err)
+	}
+}
+
 // TestAssembleContextAppliesBudgetAndSkipsExpired 验证 assemble_context 按层预算、置信度和过期状态选择条目。
 func TestAssembleContextAppliesBudgetAndSkipsExpired(t *testing.T) {
 	now := time.Date(2026, 6, 19, 10, 0, 0, 0, time.UTC)
@@ -171,7 +236,7 @@ func TestToolsetAndToolsCompile(t *testing.T) {
 	if _, err := NewWriteMemoryTool(memory); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewProposeScratchpadTool(memory); err != nil {
+	if _, err := NewPromoteScratchpadTool(memory); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := NewAssembleContextTool(memory); err != nil {

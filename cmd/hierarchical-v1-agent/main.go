@@ -39,7 +39,6 @@ type runConfig struct {
 	ValidUntil      string
 	ReadKey         string
 	PromoteKey      string
-	PromoteLayer    hierarchicalv1.MemoryLayer
 	InstructionText string
 }
 
@@ -147,7 +146,6 @@ func parseRunConfig(args []string) (runConfig, error) {
 	var writeValue string
 	var evidence string
 	var confidence float64
-	var promoteLayer string
 	var instructionFile string
 	var dbPath string
 	config := runConfig{WriteSource: hierarchicalv1.MemorySourceHuman}
@@ -165,8 +163,7 @@ func parseRunConfig(args []string) (runConfig, error) {
 	fs.IntVar(&config.TokenEstimate, "token-estimate", 0, "token estimate for layer budget selection")
 	fs.StringVar(&config.ValidUntil, "valid-until", "", "optional ISO time when the memory expires")
 	fs.StringVar(&config.ReadKey, "read-key", "", "prepare-only key to inspect")
-	fs.StringVar(&config.PromoteKey, "promote-key", "", "scratchpad key to propose into target layer")
-	fs.StringVar(&promoteLayer, "promote-layer", "", "target layer for -promote-key")
+	fs.StringVar(&config.PromoteKey, "promote-key", "", "scratchpad key to promote; layer is routed from the stable key prefix")
 	fs.StringVar(&instructionFile, "instruction-file", "", "optional file overriding the default meal-planning instruction")
 	if err := fs.Parse(args); err != nil {
 		return runConfig{}, err
@@ -221,9 +218,6 @@ func parseRunConfig(args []string) (runConfig, error) {
 	if confidence >= 0 {
 		config.Confidence = &confidence
 	}
-	if strings.TrimSpace(promoteLayer) != "" {
-		config.PromoteLayer = hierarchicalv1.MemoryLayer(strings.TrimSpace(promoteLayer))
-	}
 	if instructionFile != "" {
 		content, err := os.ReadFile(e2etest.ResolvePath(instructionFile))
 		if err != nil {
@@ -265,17 +259,14 @@ func runPrepareOnly(ctx context.Context, memory *hierarchicalv1.HierarchicalMemo
 		fmt.Printf("wrote layer=%s source=%s key=%s\n", response.Entry.Layer, response.Entry.Source, response.Entry.Key)
 	}
 	if strings.TrimSpace(config.PromoteKey) != "" {
-		if !config.PromoteLayer.Valid() {
-			return fmt.Errorf("-promote-layer must be one of policy/project/user/task/scratchpad")
-		}
-		response, err := memory.ProposeScratchpadByKey(ctx, hierarchicalv1.ProposeScratchpadRequest{
-			Key:         config.PromoteKey,
-			TargetLayer: config.PromoteLayer,
+		response, err := memory.PromoteScratchpadByKey(ctx, hierarchicalv1.PromoteScratchpadRequest{
+			Key:          config.PromoteKey,
+			EvidenceRefs: config.EvidenceRefs,
 		})
 		if err != nil {
 			return err
 		}
-		fmt.Printf("proposed key=%s target_layer=%s source=%s\n", response.Entry.Key, response.Entry.Layer, response.Entry.Source)
+		fmt.Printf("promoted key=%s resolved_layer=%s source=%s\n", response.Entry.Key, response.Entry.Layer, response.Entry.Source)
 	}
 	if strings.TrimSpace(config.ReadKey) != "" {
 		entry, ok := memory.EntryByKey(config.ReadKey)

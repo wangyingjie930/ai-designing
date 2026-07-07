@@ -149,8 +149,8 @@ func (h *HierarchicalMemory) ProposeFromScratchpad(entry MemoryEntry, targetLaye
 	return proposed, nil
 }
 
-// ProposeScratchpadByKey 供 ADK tool 使用：从已有 scratchpad key 生成目标层候选记忆。
-func (h *HierarchicalMemory) ProposeScratchpadByKey(_ context.Context, req ProposeScratchpadRequest) (*ProposeScratchpadResponse, error) {
+// PromoteScratchpadByKey 供 ADK tool 使用：验证证据、工程路由目标层，并写回正式记忆。
+func (h *HierarchicalMemory) PromoteScratchpadByKey(_ context.Context, req PromoteScratchpadRequest) (*PromoteScratchpadResponse, error) {
 	key := strings.TrimSpace(req.Key)
 	if key == "" {
 		return nil, errors.New("key is required")
@@ -159,11 +159,24 @@ func (h *HierarchicalMemory) ProposeScratchpadByKey(_ context.Context, req Propo
 	if !ok {
 		return nil, fmt.Errorf("scratchpad entry %q not found", key)
 	}
-	proposed, err := h.ProposeFromScratchpad(entry, req.TargetLayer)
+	if entry.Layer != MemoryLayerScratchpad {
+		return nil, errors.New("only scratchpad entries can be promoted")
+	}
+	evidenceRefs := mergeEvidenceRefs(entry.EvidenceRefs, req.EvidenceRefs)
+	if len(evidenceRefs) == 0 {
+		return nil, errors.New("scratchpad promotion requires evidence")
+	}
+	targetLayer := routeScratchpadPromotion(entry)
+	proposed, err := h.ProposeFromScratchpad(entry, targetLayer)
 	if err != nil {
 		return nil, err
 	}
-	return &ProposeScratchpadResponse{Entry: proposed}, nil
+	proposed.EvidenceRefs = evidenceRefs
+	written, err := h.WriteEntry(proposed)
+	if err != nil {
+		return nil, err
+	}
+	return &PromoteScratchpadResponse{Entry: written}, nil
 }
 
 // AssembleContext 对应附件 assemble_context，按固定层顺序、层预算和置信度选出可见记忆。
@@ -486,6 +499,42 @@ func normalizeEvidenceRefs(refs []string) []string {
 		}
 	}
 	return out
+}
+
+// mergeEvidenceRefs 合并 scratchpad 原有证据和本次提升证据，保持顺序并去重。
+func mergeEvidenceRefs(existing []string, additions []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(existing)+len(additions))
+	for _, ref := range append(normalizeEvidenceRefs(existing), normalizeEvidenceRefs(additions)...) {
+		if seen[ref] {
+			continue
+		}
+		seen[ref] = true
+		out = append(out, ref)
+	}
+	return out
+}
+
+// routeScratchpadPromotion 是模型之外的层级路由边界，避免 target_layer 泄漏给 LLM。
+func routeScratchpadPromotion(entry MemoryEntry) MemoryLayer {
+	return promotionLayerFromKey(entry.Key)
+}
+
+// promotionLayerFromKey 根据稳定 key 前缀选择正式层，无前缀时默认进入 task。
+func promotionLayerFromKey(key string) MemoryLayer {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	switch {
+	case strings.HasPrefix(normalized, "policy:"):
+		return MemoryLayerPolicy
+	case strings.HasPrefix(normalized, "project:"):
+		return MemoryLayerProject
+	case strings.HasPrefix(normalized, "user:"):
+		return MemoryLayerUser
+	case strings.HasPrefix(normalized, "task:"):
+		return MemoryLayerTask
+	default:
+		return MemoryLayerTask
+	}
 }
 
 // ttlSeconds 把 Go Duration 转成 health_report 里的秒数。

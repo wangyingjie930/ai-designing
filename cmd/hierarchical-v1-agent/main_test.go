@@ -74,6 +74,27 @@ func TestRunAgentPrepareOnlyRejectsPolicyInference(t *testing.T) {
 	}
 }
 
+// TestRunAgentPrepareOnlyPromotesScratchpadWithoutTargetLayer 验证 CLI 提升时目标层由工程代码路由。
+func TestRunAgentPrepareOnlyPromotesScratchpadWithoutTargetLayer(t *testing.T) {
+	output, err := runAgent(context.Background(), []string{
+		"-prepare-only",
+		"-db", filepath.Join(t.TempDir(), "hierarchical-v1.sqlite"),
+		"-write-layer", "scratchpad",
+		"-write-source", "agent_inference",
+		"-write-key", "user:early_dinner_preference",
+		"-write-value", `{"text":"家庭可能偏好早点吃晚饭"}`,
+		"-token-estimate", "5",
+		"-promote-key", "user:early_dinner_preference",
+		"-evidence", "user:round-2-confirmed",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.LayerItems["user"] != 1 || output.LayerItems["scratchpad"] != 0 {
+		t.Fatalf("layer items=%+v", output.LayerItems)
+	}
+}
+
 // TestParseRunConfigDefaults 验证无参数真实运行会自动读取非 coding 多轮输入。
 func TestParseRunConfigDefaults(t *testing.T) {
 	t.Setenv("HIERARCHICAL_V1_MEMORY_DB", "")
