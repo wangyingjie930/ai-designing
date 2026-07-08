@@ -2,7 +2,10 @@ module ai-designing
 
 go 1.25.8
 
-require github.com/cloudwego/eino v0.9.6
+require (
+	github.com/cloudwego/eino v0.9.6
+	github.com/eino-contrib/jsonschema v1.0.3
+)
 
 require (
 	github.com/cloudwego/eino-ext/callbacks/cozeloop v0.3.0
@@ -24,7 +27,6 @@ require (
 	github.com/cloudwego/eino-ext/libs/acl/openai v0.1.17 // indirect
 	github.com/coze-dev/cozeloop-go/spec v0.1.8 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/eino-contrib/jsonschema v1.0.3 // indirect
 	github.com/evanphx/json-patch v0.5.2 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/golang-jwt/jwt v3.2.2+incompatible // indirect
