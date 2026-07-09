@@ -2,7 +2,7 @@
 
 ## 目标
 
-在 `ai-designing` 中实现一个 Go + Eino ADK 的外部进程多智能体 demo，复现 Claude Code `teammate/swarm` 的核心实践：leader 启动多个独立 worker 进程，worker 通过持久化 mailbox 通信，搜索和报告产物落到共享存储，再由 leader 汇总成一份带证据引用的调查报告。
+在 `ai-designing` 中实现一个 Go + Eino ADK 的外部进程多智能体 demo，复现 Claude Code `teammate/swarm` 的核心实践：leader 先创建 team，再启动 report_director ADK agent；需要 teammate 时由模型调用 `spawn_teammate` 工具，工具再启动独立 worker 进程。worker 通过持久化 mailbox 通信，搜索和报告产物落到共享存储，再由 leader 汇总成一份带证据引用的调查报告。
 
 第一版聚焦“调查报告 Agent”，不做 coding agent。默认使用稳定的 fake search 结果，保证本地测试和 demo 不依赖外部网络；同时保留 `HTTPJSONSearchClient`，可以通过环境变量接入 Tavily、Brave、SerpAPI 或内部搜索网关这类外部搜索引擎。
 
@@ -16,12 +16,12 @@
 
 队友分工如下：
 
-- `report_director`：leader 角色，拆解调查目标，创建 team，启动 worker，投递任务，收集结果，输出最终报告。
-- `searcher`：搜索员，调用 `web_search` 获取候选资料，把结果保存为 `source_cards`，再通知 analyst。
+- `report_director`：leader 角色，拆解调查目标，创建 team，通过 `spawn_teammate` 工具动态拉起 worker；worker 完成后由 leader 收到 mailbox completion 事件，再把事件作为下一轮输入交给 director。
+- `searcher`：搜索员，调用 `web_search` 获取候选资料，把结果保存为 `source_cards`，更新 task completed，并由 worker runtime 回报 leader。
 - `analyst`：分析员，读取 `source_cards`，归纳事实、冲突点、证据强弱和待确认问题，保存分析章节。
 - `writer`：撰稿员，读取资料卡和分析章节，生成最终报告草稿，并标注引用的 source card id。
 
-这个分工刻意保留 Claude Code teammate 的关键边界：worker 的普通 assistant 文本不是跨 agent 通信，跨 worker 协作必须走 `send_message`、`update_task`、`save_source_card`、`save_report_section` 等工具。
+这个分工刻意保留 Claude Code teammate 的关键边界：worker 的普通 assistant 文本不是跨 agent 通信；默认同步不走固定 peer notification，而是 worker 完成后回报 leader。`send_message` 只保留给确实需要 teammate 之间临时澄清的 DM 场景。
 
 ## 架构
 
@@ -32,7 +32,8 @@
 - `search.go`：定义 `SearchClient` 接口、`FakeSearchClient`、`HTTPJSONSearchClient`。
 - `tools.go`：把 `send_message`、`update_task`、`web_search`、`save_source_card`、`list_source_cards`、`save_report_section` 暴露成 Eino ADK tools。
 - `agent.go`：按角色构建 Eino `ChatModelAgent`，注入中文 instruction 和角色可见工具。
-- `leader.go`：创建 team、启动 worker 进程、投递任务、轮询 mailbox、汇总最终报告。
+- `leader.go`：提供 `CreateTeam` 和底层 `TeamRuntime.SpawnTeammate` 边界；`RunLeader` 创建 team、运行 director agent、消费 leader mailbox completion 事件、关闭 teammate 和汇总结果。
+- `director.go`：构建 report_director ADK agent，并只把 `spawn_teammate` 暴露为模型可见工具；默认离线 model 也通过 leader 事件输入模拟主控决策。
 - `worker.go`：worker 主循环，消费自己的 mailbox，调用 ADK Runner，空闲后继续等待，收到 shutdown 后退出。
 
 命令入口放在 `cmd/research-report-agent/`：
@@ -42,7 +43,7 @@
 
 ## 进程模型
 
-leader 运行时创建 SQLite 数据库和 team，再通过 `os/exec` 启动同一个命令的 worker 模式：
+leader 运行时先创建 SQLite 数据库和 team。之后 report_director 模型每次需要 teammate 时，调用类似 Claude Code `AgentTool(name + team_name + description + prompt)` 的 `spawn_teammate` 工具。工具内部再通过 `os/exec` 启动同一个命令的 worker 模式。下面只是默认离线 director model 在三个阶段里触发的示例，不是 team 创建阶段的固定 roster，也不是 `RunLeader` 的显式业务脚本：
 
 ```text
 research-report-agent -role worker -team research-demo -agent searcher -db /tmp/research-swarm.sqlite
@@ -108,7 +109,7 @@ report_sections(
 
 `web_search` 的输入包含 `query`、`top_k`、`language`，输出包含标题、URL、摘要、来源和检索时间。工具只负责搜索和返回候选资料，不直接写报告；是否保存为 source card 由 searcher 显式调用 `save_source_card`。
 
-`send_message` 是跨 agent 通信的唯一入口。worker 普通 assistant 输出只作为本轮执行日志，不自动广播给其他 worker。
+`send_message` 是跨 agent DM 的唯一入口。worker 普通 assistant 输出只作为本轮执行日志，不自动广播给其他 worker；默认任务完成同步由 worker runtime 向 `report_director@<team>` 投递 `task_completed` mailbox 消息，payload 中带 `type:"artifact_ready"`、`agent_name`、`artifact`、`section` 和 `task_id`。
 
 ## 搜索接入
 
@@ -138,14 +139,13 @@ leader 模式：
 
 1. 读取主题和运行配置。
 2. 初始化 SQLite store。
-3. 创建 team 和三个 worker member。
-4. 启动 worker 子进程。
-5. 给 `searcher` 投递搜索任务。
-6. 轮询 mailbox 和 task 状态。
-7. 当 `searcher` 保存足够 source cards 后，给 `analyst` 投递分析任务。
-8. 当 `analyst` 保存分析章节后，给 `writer` 投递写作任务。
-9. 读取 `report_sections`，生成最终调查报告。
-10. 给 worker 投递 shutdown 消息并等待退出。
+3. 调用 `CreateTeam` 创建 team lead 和 team 上下文；这一步不隐式创建 worker。
+4. 构建并运行 report_director ADK agent，并先投递一轮 `start` 输入。
+5. director model 调用 `spawn_teammate` 工具启动搜索员，并把 `description/prompt` 写入 mailbox task。
+6. 搜索员写入 `source_cards`、更新 task completed，worker runtime 向 leader mailbox 投递 `task_completed/artifact_ready`。
+7. leader 消费 completion 事件，把它作为下一轮 user input 喂给 director；director 再决定是否 spawn analyst 或 writer。
+8. 最终报告章节落库后，`RunLeader` 读取 `report_sections`，生成最终调查报告。
+9. 给已经动态创建的 teammate 投递 shutdown 消息并等待退出。
 
 worker 模式：
 
@@ -154,8 +154,8 @@ worker 模式：
 3. 构建该角色的 Eino ADK `ChatModelAgent`。
 4. 轮询自己的 mailbox。
 5. 对每条未消费消息调用 `adk.Runner.Query`。
-6. 通过工具写回消息、任务、资料卡或报告章节。
-7. 空闲时更新 heartbeat。
+6. 通过工具写回任务、资料卡或报告章节；默认不向下游 teammate 发送固定 notification。
+7. task completed 后向 leader mailbox 投递 completion 事件，再进入空闲。
 8. 收到 shutdown 消息后标记 `stopped` 并退出。
 
 ## 错误处理
