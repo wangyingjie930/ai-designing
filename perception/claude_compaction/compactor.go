@@ -31,12 +31,14 @@ type Config struct {
 type CompactRequest struct {
 	Messages          []Message
 	SummaryModel      SummaryModel
+	AgentID           string
 	Trigger           Trigger
 	SuppressFollowUp  bool
 	TranscriptPath    string
 	MessagesToKeep    []Message
 	RestoreReferences RestoreReferences
 	SessionMemory     *SessionMemory
+	SkillState        *SkillState
 }
 
 // CompactResult 是压缩后的模型上下文视图。
@@ -75,7 +77,40 @@ type RestoredFile struct {
 // RestoredSkill 表示压缩前已经调用过、压缩后需要继续遵守的 skill。
 type RestoredSkill struct {
 	Name    string
+	Path    string
 	Content string
+}
+
+// Clone 复制恢复引用集合，避免 compact 过程修改调用方持有的切片。
+func (r RestoreReferences) Clone() RestoreReferences {
+	return RestoreReferences{
+		Files:           cloneRestoredFiles(r.Files),
+		InvokedSkills:   cloneRestoredSkills(r.InvokedSkills),
+		Plan:            r.Plan,
+		PlanMode:        r.PlanMode,
+		DeferredTools:   cloneStrings(r.DeferredTools),
+		MCPInstructions: cloneStrings(r.MCPInstructions),
+	}
+}
+
+// cloneRestoredFiles 复制文件恢复引用。
+func cloneRestoredFiles(files []RestoredFile) []RestoredFile {
+	if len(files) == 0 {
+		return nil
+	}
+	out := make([]RestoredFile, len(files))
+	copy(out, files)
+	return out
+}
+
+// cloneStrings 复制字符串切片。
+func cloneStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, len(values))
+	copy(out, values)
+	return out
 }
 
 // Compactor 还原 Claude Code 的上下文压缩编排：模型只总结，边界和恢复由代码管理。
@@ -145,7 +180,7 @@ func (c *Compactor) buildResult(req CompactRequest, summary string, sessionMemor
 	prepared := PrepareMessagesForSummary(req.Messages)
 	boundary := c.compactBoundary(req.Trigger, totalTokens(req.Messages), len(prepared))
 	summaryMessage := c.summaryMessage(summary, req.SuppressFollowUp, req.TranscriptPath, len(sessionMemoryKeep) > 0)
-	attachments := c.restoreAttachments(req.RestoreReferences)
+	attachments := c.restoreAttachments(restoreReferencesWithSkillState(req.RestoreReferences, req.SkillState, req.AgentID))
 	messages := BuildPostCompactMessages(boundary, summaryMessage, postCompactKeep, attachments)
 	return CompactResult{
 		Messages:        messages,
@@ -203,6 +238,7 @@ func (c *Compactor) restoreAttachments(refs RestoreReferences) []Message {
 			Attachment{
 				Type:    AttachmentInvokedSkill,
 				Name:    skill.Name,
+				Path:    skill.Path,
 				Content: skill.Content,
 			},
 			WithTimestamp(c.config.Now()),

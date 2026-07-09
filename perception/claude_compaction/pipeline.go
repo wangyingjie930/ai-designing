@@ -15,6 +15,7 @@ type TaskBudget struct {
 type QueryPipelineConfig struct {
 	Compactor         *Compactor
 	CompactorConfig   Config
+	SkillState        *SkillState
 	ToolResultBudget  *ToolResultBudgetConfig
 	HistorySnip       *HistorySnipConfig
 	AutoCompactPolicy AutoCompactPolicy
@@ -25,6 +26,7 @@ type QueryPipelineConfig struct {
 type QueryPipelineRequest struct {
 	Messages          []Message
 	SummaryModel      SummaryModel
+	AgentID           string
 	Source            QuerySource
 	Trigger           Trigger
 	SuppressFollowUp  bool
@@ -51,6 +53,7 @@ type QueryPipelineResult struct {
 // QueryPipeline 还原 Claude Code query 主链里“进入模型前”的压缩编排。
 type QueryPipeline struct {
 	compactor        *Compactor
+	skillState       *SkillState
 	policy           AutoCompactPolicy
 	toolResultBudget *ToolResultBudgetConfig
 	historySnip      *HistorySnipConfig
@@ -65,6 +68,7 @@ func NewQueryPipeline(config QueryPipelineConfig) *QueryPipeline {
 	}
 	return &QueryPipeline{
 		compactor:        compactor,
+		skillState:       config.SkillState,
 		policy:           config.AutoCompactPolicy,
 		toolResultBudget: config.ToolResultBudget,
 		historySnip:      config.HistorySnip,
@@ -125,12 +129,14 @@ func (p *QueryPipeline) Run(ctx context.Context, req QueryPipelineRequest) (Quer
 	compactResult, err := p.compactor.Compact(ctx, CompactRequest{
 		Messages:          messagesForQuery,
 		SummaryModel:      req.SummaryModel,
+		AgentID:           req.AgentID,
 		Trigger:           defaultTrigger(req.Trigger),
 		SuppressFollowUp:  req.SuppressFollowUp,
 		TranscriptPath:    req.TranscriptPath,
 		MessagesToKeep:    req.MessagesToKeep,
 		RestoreReferences: req.RestoreReferences,
 		SessionMemory:     req.SessionMemory,
+		SkillState:        p.skillState,
 	})
 	if err != nil {
 		return QueryPipelineResult{}, err
@@ -148,13 +154,26 @@ func (p *QueryPipeline) Run(ctx context.Context, req QueryPipelineRequest) (Quer
 
 // QuerySession 保存一条可恢复的会话历史，用于演示 compact boundary 写回后的 resume 语义。
 type QuerySession struct {
-	mu       sync.Mutex
-	messages []Message
+	mu         sync.Mutex
+	messages   []Message
+	skillState *SkillState
 }
 
 // NewQuerySession 创建内存 session，并复制初始历史以隔离外部修改。
 func NewQuerySession(messages []Message) *QuerySession {
 	return &QuerySession{messages: cloneMessages(messages)}
+}
+
+// NewQuerySessionWithSkillState 创建带 skill 状态恢复的内存 session，用于模拟 resume 后继续 compact。
+func NewQuerySessionWithSkillState(messages []Message, skillState *SkillState) *QuerySession {
+	session := &QuerySession{
+		messages:   cloneMessages(messages),
+		skillState: skillState,
+	}
+	if skillState != nil {
+		skillState.RestoreFromMessages(messages, "")
+	}
+	return session
 }
 
 // Messages 返回当前 session 历史副本。
@@ -199,6 +218,12 @@ func (s *QuerySession) PrepareNextQuery(ctx context.Context, pipeline *QueryPipe
 	}
 	if len(result.WritebackMessages) > 0 {
 		s.Append(result.WritebackMessages...)
+	}
+	if pipeline.skillState != nil {
+		pipeline.skillState.RestoreFromMessages(result.WritebackMessages, req.AgentID)
+	}
+	if s.skillState != nil && s.skillState != pipeline.skillState {
+		s.skillState.RestoreFromMessages(result.WritebackMessages, req.AgentID)
 	}
 	return result, nil
 }

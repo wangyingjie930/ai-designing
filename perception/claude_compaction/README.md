@@ -1,4 +1,4 @@
-只看 `/Users/wangyingjie/Documents/code/ai-designing/perception/claude_compaction`，现在实现的是一套 **Claude Code 风格 query-loop 压缩还原**，可以分成 6 类：
+只看 `/Users/wangyingjie/Documents/code/ai-designing/perception/claude_compaction`，现在实现的是一套 **Claude Code 风格 query-loop 压缩还原**，可以分成 7 类：
 
 1. **Tool Result Budget 压缩**
 
@@ -23,6 +23,8 @@
    作用：只清理旧的可压缩工具结果，比如 `Read`、`Bash`、`Grep`、`Glob`、`WebSearch` 等。
 
    本质是：**不调用摘要模型，只把旧 tool result 内容换成 `[Old tool result content cleared]`**。
+
+   这里实现的是普通 microcompact，不是 Claude Code 的 cached microcompact / cache editing 路径。后者依赖 Claude API 的服务端 prompt cache 能力：请求里给旧 `tool_result` 标记 `cache_reference`，再附带 `cache_edits` 删除指令，由服务端缓存层删除对应 KV cache 内容。本包没有接真实 Claude API adapter，所以暂时不实现，只保留本地消息改写版。
 
 4. **AutoCompact 触发策略**
 
@@ -54,6 +56,28 @@
 
    本质是：**复用已经维护好的短期会话摘要，避免再次总结全部历史**。
 
+7. **Invoked Skill 状态保活**
+
+   入口：[skill_state.go](/Users/wangyingjie/Documents/code/ai-designing/perception/claude_compaction/skill_state.go:37)
+
+   作用：运行时记录已经调用过的 skill，compact 时自动生成 `invoked_skill` attachment，resume 时再从 attachment 恢复 `SkillState`。
+
+   本质是：**不重复注入完整 `skill_listing`，只保留已经用过、继续工作必须遵守的 skill 内容**。
+
+## 压缩后附件重建
+
+Claude Code 压缩后不是只留下 summary，也不是把旧附件原样全量重放。它会在 `compact boundary -> compact summary` 之后，由代码重新补回必要 attachments，让模型能继续工作。
+
+本包对应的是 [restoreAttachments](/Users/wangyingjie/Documents/code/ai-designing/perception/claude_compaction/compactor.go:220)：
+
+- `compact_file_reference`：补回最近读过、压缩后仍需要参考的文件片段。
+- `invoked_skill`：补回已经调用过的 skill 内容；完整 `skill_listing` 不会因为 compact 被重复注入。
+- `plan_reference` / `plan_mode`：补回计划内容和计划模式状态。
+- `deferred_tool_delta`：补回压缩前后模型仍需要知道的延迟工具变化。
+- `mcp_instruction_delta`：补回 MCP 相关指令变化。
+
+这里的关键边界是：**summary 负责保留语义连续性，attachments 负责恢复运行时上下文；可由代码重建的附件不会交给摘要模型硬记。**
+
 总流程在 [pipeline.go](/Users/wangyingjie/Documents/code/ai-designing/perception/claude_compaction/pipeline.go:75)：
 
 ```text
@@ -63,9 +87,22 @@ MessagesAfterLastCompactBoundary
 -> Microcompact
 -> AutoCompactPolicy
 -> Compactor.Compact
+-> SkillState 自动补回 invoked_skill attachment
 -> postCompactMessages 写回 / 替换 messagesForQuery
+-> resume 时从 invoked_skill attachment 恢复 SkillState
 ```
 
 所以一句话概括：
 
-**`claude_compaction` 实现了三种非模型压缩：tool result budget、history snip、microcompact；两种语义压缩：模型 compact summary、session memory compact；再用 auto compact policy 和 query pipeline 把它们串成 Claude Code 风格的上下文压缩流程。**
+**`claude_compaction` 实现了三种非模型压缩：tool result budget、history snip、microcompact；两种语义压缩：模型 compact summary、session memory compact；再用 auto compact policy、query pipeline 和 SkillState 把它们串成 Claude Code 风格的上下文压缩流程。**
+
+## 暂不实现：Claude API cache editing
+
+Claude Code 里的 cached microcompact 不是普通 prompt 技巧，而是 Claude API 的服务端缓存编辑能力。它大致做两件事：
+
+1. 在发给 Claude API 的消息块里，为旧 `tool_result` 加上 `cache_reference`。
+2. 在同一次或后续请求里插入 `cache_edits` block，例如声明删除某个 `cache_reference`。
+
+这样本地 transcript 不需要被改写，但 Claude 服务端在组装本轮上下文缓存时，可以把指定旧工具结果从 KV cache 里移除。API 返回的 `cache_deleted_input_tokens` 可以用来确认这次删除实际释放了多少缓存 token。
+
+本包当前暂不实现这条路径，原因是它依赖真实 Claude API 的 beta/header、`cache_reference`、`cache_edits` 和服务端缓存语义；如果只在本地模拟，最多只能生成“计划删除哪些 tool result”的结构，不能真的让服务端 KV cache 删除内容。因此当前实现保留语义正确优先的普通 microcompact：直接把本地消息里的旧工具结果内容替换为占位文本。
