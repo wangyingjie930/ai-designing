@@ -1,5 +1,7 @@
 package claudeautomemory
 
+import "context"
+
 // MemoryType 表示 Claude 风格自动记忆的封闭语义分类。
 type MemoryType string
 
@@ -69,4 +71,30 @@ type IndexEntry struct {
 type MemoryManifest struct {
 	Private []IndexEntry `json:"private"`
 	Team    []IndexEntry `json:"team"`
+}
+
+// Role 表示自动记忆链路关心的对话角色。
+type Role string
+
+const (
+	RoleUser      Role = "user"
+	RoleAssistant Role = "assistant"
+)
+
+// ConversationMessage 是主会话与提取器之间共享的最小消息契约。
+type ConversationMessage struct {
+	Role    Role   `json:"role"`
+	Content string `json:"content"`
+}
+
+// MemoryExtractor 让语义提取模型与确定性的游标、存储逻辑解耦。
+type MemoryExtractor interface {
+	Extract(ctx context.Context, messages []ConversationMessage) ([]MemoryCandidate, error)
+}
+
+// ExtractionResult 汇总一次回答后提取的写入结果和非致命警告。
+type ExtractionResult struct {
+	Written           []MemoryRecord
+	ProcessedMessages int
+	Warnings          []error
 }
