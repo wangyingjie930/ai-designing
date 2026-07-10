@@ -11,7 +11,7 @@ import (
 type Runner struct {
 	recaller  *Recaller
 	chat      ChatAgent
-	extractor *Extractor
+	scheduler *ExtractionScheduler
 	history   []ConversationMessage
 	mu        sync.Mutex
 }
@@ -27,10 +27,14 @@ func NewRunner(recaller *Recaller, chat ChatAgent, extractor *Extractor) (*Runne
 	if extractor == nil {
 		return nil, errors.New("memory extractor is required")
 	}
-	return &Runner{recaller: recaller, chat: chat, extractor: extractor}, nil
+	scheduler, err := NewExtractionScheduler(extractor)
+	if err != nil {
+		return nil, err
+	}
+	return &Runner{recaller: recaller, chat: chat, scheduler: scheduler}, nil
 }
 
-// RunTurn 执行 Recall -> Main Agent -> Extract，使新记忆从下一轮开始生效。
+// RunTurn 执行 Recall -> Main Agent -> Schedule，提交后台抽取后立即返回主回答。
 func (r *Runner) RunTurn(ctx context.Context, userInput string) (TurnResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -52,13 +56,16 @@ func (r *Runner) RunTurn(ctx context.Context, userInput string) (TurnResult, err
 		return TurnResult{}, errors.New("main chat agent returned an empty answer")
 	}
 	r.history = append(pending, ConversationMessage{Role: RoleAssistant, Content: answer})
-	// 业务边界三：回答完成后再独立提取，所以本轮新记忆只会影响下一轮。
-	extraction := r.extractor.ExtractNew(ctx, r.history)
-	warnings := append([]error(nil), recall.Warnings...)
-	warnings = append(warnings, extraction.Warnings...)
+	// 业务边界三：只提交会话快照，后台模型和文件 I/O 不进入主回答延迟。
+	r.scheduler.Schedule(ctx, r.history)
 	return TurnResult{
-		Answer: answer, Recalled: recall.Records, Written: extraction.Written, Warnings: warnings,
+		Answer: answer, Recalled: recall.Records, Warnings: append([]error(nil), recall.Warnings...),
 	}, nil
+}
+
+// Drain 等待当前及 trailing 后台提取，供脚本模式、测试和进程退出阶段使用。
+func (r *Runner) Drain(ctx context.Context) (DrainResult, error) {
+	return r.scheduler.Drain(ctx)
 }
 
 // History 返回会话历史副本，避免调用方把记忆维护消息写回主上下文。

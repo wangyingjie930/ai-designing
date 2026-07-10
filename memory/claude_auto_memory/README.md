@@ -8,7 +8,8 @@
   -> 选择最多 5 个相关主题
   -> 注入主 Agent
   -> 生成回答
-  -> 独立提取新增对话
+  -> 立即返回/打印回答
+       └-> 后台单实例提取新增对话
   -> 模型选择 type + scope
   -> 写主题 Markdown 并更新对应 MEMORY.md
   -> 下一轮生效
@@ -41,6 +42,13 @@ go run ./cmd/claude-auto-memory-agent \
 
 默认输入位于 `examples/interview_rounds.txt`，也可以用 `-rounds-file` 替换。文件支持 JSON 字符串数组，或用单独一行 `---` 分隔多轮消息。
 
+### 运行时语义
+
+- `Runner.RunTurn` 对应交互主链路：生成回答后只调用 `Schedule`，不等待提取模型和文件写入。
+- `ExtractionScheduler` 同时最多运行一个任务；繁忙时反复提交只保留最新会话快照，当前任务完成后执行一次 trailing extraction。
+- `Runner.Drain` 对应 Claude Code 的退出/测试边界：等待当前任务和 trailing extraction，并返回后台写入和 warning。
+- 默认三轮 CLI 是脚本模式：每轮先把 assistant 回答写到 stdout，再 Drain，保证下一轮演示可以稳定召回上一轮记忆。这个等待不属于主回答延迟。
+
 ## 落盘结构
 
 ```text
@@ -56,7 +64,7 @@ go run ./cmd/claude-auto-memory-agent \
 
 ## 六个面试要点
 
-1. **回答后提取**：`Runner` 先返回主语义结果，再用独立 `Extractor` 处理新增 user/assistant 消息；提取 prompt 不进入主历史。
+1. **回答后异步提取**：`Runner` 生成回答后只 fire-and-forget 提交快照；`ExtractionScheduler` 在后台调用独立 `Extractor`，提取模型卡住也不会阻塞主回答。
 2. **模型负责语义决策**：提取模型同时选择 `user/feedback/project/reference` 和 `private/team`。工程层不写 `type -> scope` 固定映射，只强制个人 `user` 记忆不能进入 team。
 3. **主题正文加低成本索引**：完整内容放主题文件，`MEMORY.md` 只保留 topic、type 和 description。召回前无需把所有正文塞给模型。
 4. **两阶段召回**：模型先从两个索引选择最多 5 个引用，存储层再验证引用确实存在于 manifest 后读取正文。
@@ -72,8 +80,9 @@ go run ./cmd/claude-auto-memory-agent \
 | `frontmatter.go` | Markdown topic/index 编解码 |
 | `security.go` | 路径、符号链接和 team secret guard |
 | `extractor.go` | 新消息游标和回答后提取 |
+| `scheduler.go` | fire-and-forget、单实例、latest-wins 合并和 Drain |
 | `recall.go` | manifest 选择、去重、最多 5 条正文 |
-| `runner.go` | `Recall -> Main Agent -> Extract` 主链路 |
+| `runner.go` | `Recall -> Main Agent -> Schedule` 主链路 |
 | `prompts.go` / `llm.go` | 中文契约和 Eino 模型适配 |
 
 ## Claude Code 源码概念映射
@@ -82,7 +91,7 @@ go run ./cmd/claude-auto-memory-agent \
 
 | Claude Code 概念 | 本实现 |
 |---|---|
-| `src/services/extractMemories/extractMemories.ts` | `extractor.go`、`runner.go` |
+| `src/services/extractMemories/extractMemories.ts` | `extractor.go`、`scheduler.go`、`runner.go` |
 | `src/services/extractMemories/prompts.ts` | `prompts.go` |
 | `src/memdir/memoryTypes.ts` | `types.go` |
 | `src/memdir/paths.ts`、`teamMemPaths.ts` | `store.go` |
@@ -99,7 +108,7 @@ go run ./cmd/claude-auto-memory-agent \
 | 存储 | 可读 Markdown | SQLite |
 | 分类 | 模型选择四类和两作用域 | 工程定义五层和写入策略 |
 | 召回 | 索引摘要 + 模型选最多 5 条 | 按层、预算和状态组装 |
-| 生命周期 | 回答后提取，下一轮使用 | retention、evidence、promotion |
+| 生命周期 | 回答后后台提取、忙时合并、退出前 Drain | retention、evidence、promotion |
 | 目标 | Claude Code 核心链路面试演示 | 通用层级记忆实验 |
 
 ## 测试
@@ -109,7 +118,7 @@ env GOCACHE=/private/tmp/ai-designing-claude-auto-memory-gocache \
   go test ./memory/claude_auto_memory ./cmd/claude-auto-memory-agent -count=1
 ```
 
-测试使用 fake 模型确定性证明双索引、增量游标、五条上限、非法引用降级、本轮写入下一轮生效，以及命令确实装配三个隔离角色。普通 `go test` 不访问网络。
+测试使用 fake 模型确定性证明双索引、增量游标、五条上限、非法引用降级、本轮写入下一轮生效、阻塞提取不阻塞回答、忙时只保留最新快照，以及命令确实装配三个隔离角色。普通 `go test` 不访问网络。
 
 ## 明确不做
 

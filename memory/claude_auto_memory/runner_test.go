@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 // queryMemorySelector 在问题包含“偏好”时选择 private 候选，用于证明下一轮生效。
@@ -60,8 +61,15 @@ func TestRunnerNewMemoryAffectsNextTurnNotCurrentTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first.Recalled) != 0 || len(first.Written) != 1 || chat.memoryContexts[0] != "" {
+	if len(first.Recalled) != 0 || chat.memoryContexts[0] != "" {
 		t.Fatalf("first = %+v contexts = %+v", first, chat.memoryContexts)
+	}
+	drained, err := runner.Drain(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(drained.Written) != 1 {
+		t.Fatalf("drained = %+v", drained)
 	}
 	second, err := runner.RunTurn(context.Background(), "我写代码有什么偏好？")
 	if err != nil {
@@ -69,6 +77,54 @@ func TestRunnerNewMemoryAffectsNextTurnNotCurrentTurn(t *testing.T) {
 	}
 	if len(second.Recalled) != 1 || !strings.Contains(chat.memoryContexts[1], "中文注释") {
 		t.Fatalf("second = %+v contexts = %+v", second, chat.memoryContexts)
+	}
+	if _, err := runner.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRunnerReturnsBeforeBlockedExtraction 验证后台提取卡住时，主回答仍然立即返回。
+func TestRunnerReturnsBeforeBlockedExtraction(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := newBlockingExtractorModel()
+	extractor, _ := NewExtractor(store, model)
+	recaller, _ := NewRecaller(store, &fakeMemorySelector{})
+	runner, err := NewRunner(recaller, &recordingChatAgent{}, extractor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type turnOutcome struct {
+		result TurnResult
+		err    error
+	}
+	returned := make(chan turnOutcome, 1)
+	go func() {
+		result, runErr := runner.RunTurn(context.Background(), "请记住这个偏好")
+		returned <- turnOutcome{result: result, err: runErr}
+	}()
+
+	select {
+	case outcome := <-returned:
+		if outcome.err != nil || outcome.result.Answer == "" {
+			t.Fatalf("outcome = %+v", outcome)
+		}
+	case <-time.After(time.Second):
+		close(model.release)
+		<-returned
+		t.Fatal("RunTurn waited for blocked extraction")
+	}
+	select {
+	case <-model.started:
+	case <-time.After(time.Second):
+		close(model.release)
+		t.Fatal("background extraction did not start")
+	}
+	close(model.release)
+	if _, err := runner.Drain(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
 

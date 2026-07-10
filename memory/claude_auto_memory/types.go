@@ -99,6 +99,14 @@ type ExtractionResult struct {
 	Warnings          []error
 }
 
+// DrainResult 汇总一次 Drain 等待到的所有后台提取批次。
+type DrainResult struct {
+	Batches           int
+	ProcessedMessages int
+	Written           []MemoryRecord
+	Warnings          []error
+}
+
 // MemorySelector 根据当前问题和双索引选择少量相关主题引用。
 type MemorySelector interface {
 	Select(ctx context.Context, query string, manifest MemoryManifest) ([]MemoryRef, error)
@@ -116,10 +124,9 @@ type ChatAgent interface {
 	Generate(ctx context.Context, messages []ConversationMessage, memoryContext string) (string, error)
 }
 
-// TurnResult 汇总一轮回答、当轮召回、回答后写入和降级警告。
+// TurnResult 汇总立即可返回的主回答、当轮召回和召回降级警告。
 type TurnResult struct {
 	Answer   string
 	Recalled []MemoryRecord
-	Written  []MemoryRecord
 	Warnings []error
 }

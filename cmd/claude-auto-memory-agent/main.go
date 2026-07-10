@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/components/model"
@@ -18,9 +19,10 @@ import (
 )
 
 const (
-	defaultEnvPath    = ".env"
-	defaultMemoryDir  = "output/claude-auto-memory"
-	defaultRoundsPath = "memory/claude_auto_memory/examples/interview_rounds.txt"
+	defaultEnvPath         = ".env"
+	defaultMemoryDir       = "output/claude-auto-memory"
+	defaultRoundsPath      = "memory/claude_auto_memory/examples/interview_rounds.txt"
+	extractionDrainTimeout = 60 * time.Second
 )
 
 // runConfig 保存自动记忆面试命令的文件路径和运行模式。
@@ -139,12 +141,25 @@ func runRounds(ctx context.Context, memoryDir string, runner *claudeautomemory.R
 		}
 		fmt.Printf("\n=== Round %d ===\nuser: %s\nassistant: %s\n", index+1, message, result.Answer)
 		fmt.Printf("recalled=%s\n", formatRecords(result.Recalled))
-		fmt.Printf("written=%s\n", formatRecords(result.Written))
 		for _, warning := range result.Warnings {
 			fmt.Printf("memory_warning=%v\n", warning)
 		}
+		// 主回答已经写到 stdout 后再等待后台抽取；等待只影响脚本进入下一轮，不计入回答延迟。
+		drainCtx, cancelDrain := context.WithTimeout(ctx, extractionDrainTimeout)
+		drained, drainErr := runner.Drain(drainCtx)
+		cancelDrain()
+		if drainErr != nil {
+			fmt.Printf("written=none\nmemory_warning=drain extraction: %v\n", drainErr)
+			output.Warnings++
+		} else {
+			fmt.Printf("written=%s\n", formatRecords(drained.Written))
+			for _, warning := range drained.Warnings {
+				fmt.Printf("memory_warning=%v\n", warning)
+			}
+			output.Written += len(drained.Written)
+			output.Warnings += len(drained.Warnings)
+		}
 		output.Recalled += len(result.Recalled)
-		output.Written += len(result.Written)
 		output.Warnings += len(result.Warnings)
 		output.AnswerChars += len([]rune(result.Answer))
 	}
