@@ -98,3 +98,15 @@ type ExtractionResult struct {
 	ProcessedMessages int
 	Warnings          []error
 }
+
+// MemorySelector 根据当前问题和双索引选择少量相关主题引用。
+type MemorySelector interface {
+	Select(ctx context.Context, query string, manifest MemoryManifest) ([]MemoryRef, error)
+}
+
+// RecallResult 汇总安全读取到的记忆正文、注入文本和降级警告。
+type RecallResult struct {
+	Records  []MemoryRecord
+	Context  string
+	Warnings []error
+}
