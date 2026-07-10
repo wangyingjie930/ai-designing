@@ -110,3 +110,16 @@ type RecallResult struct {
 	Context  string
 	Warnings []error
 }
+
+// ChatAgent 是只负责业务回答的主 Agent 边界，不暴露记忆维护 prompt。
+type ChatAgent interface {
+	Generate(ctx context.Context, messages []ConversationMessage, memoryContext string) (string, error)
+}
+
+// TurnResult 汇总一轮回答、当轮召回、回答后写入和降级警告。
+type TurnResult struct {
+	Answer   string
+	Recalled []MemoryRecord
+	Written  []MemoryRecord
+	Warnings []error
+}
