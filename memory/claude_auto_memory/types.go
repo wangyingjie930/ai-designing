@@ -159,7 +159,8 @@ type ChatAgent interface {
 
 // TurnResult 汇总立即可返回的主回答、当轮召回和召回降级警告。
 type TurnResult struct {
-	Answer   string
-	Recalled []MemoryRecord
-	Warnings []error
+	Answer    string
+	Recalled  []MemoryRecord
+	Compacted bool
+	Warnings  []error
 }

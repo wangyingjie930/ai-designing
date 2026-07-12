@@ -61,6 +61,13 @@ func (e *Extractor) Cursor() string {
 	return e.lastExtractedMessageID
 }
 
+// ResumeAfter 在恢复完整 Transcript 时把长期记忆游标定位到已有消息末尾，避免重复抽取历史会话。
+func (e *Extractor) ResumeAfter(messageID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.lastExtractedMessageID = messageID
+}
+
 // messagesAfterCursor 从完整 Transcript 中选择游标之后的真实消息，并排除 Compact 摘要。
 func messagesAfterCursor(history []ConversationMessage, cursor string) ([]ConversationMessage, string, error) {
 	start := 0
