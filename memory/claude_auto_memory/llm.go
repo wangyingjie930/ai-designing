@@ -96,6 +96,45 @@ type LLMChatAgent struct {
 	model model.BaseChatModel
 }
 
+// LLMSessionSummarizer 使用独立 Prompt 把新增真实会话更新为完整结构化摘要。
+type LLMSessionSummarizer struct {
+	model model.BaseChatModel
+}
+
+// NewLLMSessionSummarizer 创建与主回答和长期记忆提取隔离的 Session 模型角色。
+func NewLLMSessionSummarizer(chatModel model.BaseChatModel) (*LLMSessionSummarizer, error) {
+	if chatModel == nil {
+		return nil, errors.New("chat model is required")
+	}
+	return &LLMSessionSummarizer{model: chatModel}, nil
+}
+
+// Summarize 发送当前摘要和增量消息，只接受模型返回的完整 Markdown 正文。
+func (s *LLMSessionSummarizer) Summarize(ctx context.Context, currentSummary string, messages []ConversationMessage) (string, error) {
+	if len(messages) == 0 {
+		return normalizeSessionSummary(currentSummary), nil
+	}
+	payload, err := json.Marshal(struct {
+		CurrentSummary string                `json:"current_summary"`
+		NewMessages    []ConversationMessage `json:"new_messages"`
+	}{CurrentSummary: currentSummary, NewMessages: messages})
+	if err != nil {
+		return "", fmt.Errorf("encode session memory input: %w", err)
+	}
+	response, err := s.model.Generate(ctx, []*schema.Message{
+		schema.SystemMessage(sessionMemorySystemPrompt()),
+		schema.UserMessage("请更新当前 Session Memory：\n" + string(payload)),
+	})
+	if err != nil {
+		return "", fmt.Errorf("update session memory: %w", err)
+	}
+	content := messageContent(response)
+	if content == "" {
+		return "", errors.New("session memory model returned empty content")
+	}
+	return normalizeSessionSummary(content), nil
+}
+
 // NewLLMChatAgent 创建只负责业务回答的模型适配器。
 func NewLLMChatAgent(chatModel model.BaseChatModel) (*LLMChatAgent, error) {
 	if chatModel == nil {

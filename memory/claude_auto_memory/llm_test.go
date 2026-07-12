@@ -95,6 +95,27 @@ func TestLLMChatAgentInjectsMemoryWithoutMutatingHistory(t *testing.T) {
 	}
 }
 
+// TestLLMSessionSummarizerUsesIsolatedPrompt 验证 Session 摘要不会复用长期记忆提取指令。
+func TestLLMSessionSummarizerUsesIsolatedPrompt(t *testing.T) {
+	summary := strings.Replace(defaultSessionMemoryTemplate, "# 当前状态\n", "# 当前状态\n正在接入会话摘要。\n", 1)
+	fake := &staticChatModel{contents: []string{summary}}
+	summarizer, err := NewLLMSessionSummarizer(fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := summarizer.Summarize(context.Background(), defaultSessionMemoryTemplate, []ConversationMessage{
+		NewConversationMessage(RoleUser, "开始接入会话摘要"),
+		NewConversationMessage(RoleAssistant, "收到"),
+	})
+	if err != nil || updated != summary {
+		t.Fatalf("updated = %q err = %v", updated, err)
+	}
+	joined := joinSchemaMessageContent(fake.inputs[0])
+	if !strings.Contains(joined, sessionMemoryUpdateMarker) || strings.Contains(joined, autoMemoryExtractMarker) {
+		t.Fatalf("model input = %s", joined)
+	}
+}
+
 // joinSchemaMessageContent 拼接模型消息正文，便于测试隔离 prompt 是否存在。
 func joinSchemaMessageContent(messages []*schema.Message) string {
 	var contents []string
