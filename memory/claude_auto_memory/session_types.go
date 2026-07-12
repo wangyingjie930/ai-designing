@@ -44,3 +44,25 @@ type SessionSnapshot struct {
 type SessionSummarizer interface {
 	Summarize(ctx context.Context, currentSummary string, messages []ConversationMessage) (string, error)
 }
+
+// TokenEstimator 为阈值判断提供可替换、可测试的上下文 token 估算。
+type TokenEstimator interface {
+	Estimate(messages []ConversationMessage) int
+}
+
+// SessionUpdateResult 汇总一次后台摘要尝试，不把 Summary 正文暴露给 CLI trace。
+type SessionUpdateResult struct {
+	Updated           bool
+	SummarizedThrough string
+	ProcessedMessages int
+	Warnings          []error
+}
+
+// SessionDrainResult 汇总 Wait 等待到的所有后台 Session 更新批次。
+type SessionDrainResult struct {
+	Batches           int
+	Updates           int
+	ProcessedMessages int
+	SummarizedThrough string
+	Warnings          []error
+}
