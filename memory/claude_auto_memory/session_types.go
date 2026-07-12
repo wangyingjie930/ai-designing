@@ -66,3 +66,12 @@ type SessionDrainResult struct {
 	SummarizedThrough string
 	Warnings          []error
 }
+
+// CompactResult 描述 Session Summary 是否替换了旧 Context 以及安全降级警告。
+type CompactResult struct {
+	Messages  []ConversationMessage
+	Compacted bool
+	Before    int
+	After     int
+	Warnings  []error
+}
