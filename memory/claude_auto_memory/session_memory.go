@@ -96,9 +96,10 @@ func (u *SessionMemoryUpdater) Update(ctx context.Context, transcript []Conversa
 // shouldUpdate 强制 token 增长门槛，并在工具批次完成或自然对话停顿时触发。
 func (u *SessionMemoryUpdater) shouldUpdate(state SessionState, currentTokens int, newMessages []ConversationMessage) bool {
 	if !state.Initialized {
-		return currentTokens >= u.config.MinimumTokensToInit && isNaturalSessionBoundary(newMessages)
-	}
-	if currentTokens-state.TokensAtLastUpdate < u.config.MinimumTokensBetweenUpdates {
+		if currentTokens < u.config.MinimumTokensToInit {
+			return false
+		}
+	} else if currentTokens-state.TokensAtLastUpdate < u.config.MinimumTokensBetweenUpdates {
 		return false
 	}
 	toolCalls := 0

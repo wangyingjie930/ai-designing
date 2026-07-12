@@ -2,6 +2,7 @@ package claudeautomemory
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -101,5 +102,32 @@ func TestSessionCompactorSkipsEmptyTemplate(t *testing.T) {
 	result := newCompactorForTest(t, store).MaybeCompact(context.Background(), messages, false)
 	if result.Compacted || len(result.Messages) != 2 {
 		t.Fatalf("result = %+v", result)
+	}
+}
+
+// TestSessionCompactorSurfacesBackgroundUpdateWarnings 验证 Compact 消费后台结果时不会吞掉摘要失败。
+func TestSessionCompactorSurfacesBackgroundUpdateWarnings(t *testing.T) {
+	store, _ := NewSessionStore(t.TempDir(), "session-1")
+	messages := []ConversationMessage{
+		NewConversationMessage(RoleUser, "旧问题"),
+		NewConversationMessage(RoleAssistant, "旧回答"),
+		NewConversationMessage(RoleUser, "新问题"),
+		NewConversationMessage(RoleAssistant, "新回答"),
+	}
+	if err := store.Commit(context.Background(), validSessionSummary(), SessionState{
+		LastSummarizedMessageID: messages[1].ID, TokensAtLastUpdate: 20, Initialized: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	config := lowSessionConfig()
+	config.CompactTokens = 1
+	config.MinimumRecentMessages = 1
+	updater, _ := NewSessionMemoryUpdater(store, &fakeSessionSummarizer{err: errors.New("summary unavailable")}, perMessageTokenEstimator(20), config)
+	scheduler, _ := NewSessionScheduler(updater)
+	scheduler.Schedule(context.Background(), messages)
+	compactor, _ := NewSessionCompactor(store, scheduler, perMessageTokenEstimator(20), config)
+	result := compactor.MaybeCompact(context.Background(), messages, false)
+	if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0].Error(), "summary unavailable") {
+		t.Fatalf("warnings = %+v", result.Warnings)
 	}
 }

@@ -130,3 +130,19 @@ func TestSessionUpdaterProcessesOnlyMessagesAfterUUIDBoundary(t *testing.T) {
 		t.Fatalf("inputs = %+v", model.inputs)
 	}
 }
+
+// TestSessionUpdaterInitializesAtToolCallBoundary 验证首次更新也支持 token 与工具调用双阈值。
+func TestSessionUpdaterInitializesAtToolCallBoundary(t *testing.T) {
+	store, _ := NewSessionStore(t.TempDir(), "session-1")
+	model := &fakeSessionSummarizer{}
+	config := lowSessionConfig()
+	config.ToolCallsBetweenUpdates = 3
+	updater, _ := NewSessionMemoryUpdater(store, model, perMessageTokenEstimator(1), config)
+	user := NewConversationMessage(RoleUser, "执行工具任务")
+	assistant := NewConversationMessage(RoleAssistant, "正在调用工具")
+	assistant.ToolCallCount = 3
+	result := updater.Update(context.Background(), []ConversationMessage{user, assistant})
+	if !result.Updated || model.Calls() != 1 {
+		t.Fatalf("result = %+v calls = %d", result, model.Calls())
+	}
+}

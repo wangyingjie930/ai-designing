@@ -43,8 +43,9 @@ func (c *SessionCompactor) MaybeCompact(ctx context.Context, messages []Conversa
 	}
 	// Compact 只在消费边界等待生产者，普通回答路径始终保持异步。
 	waitCtx, cancel := context.WithTimeout(ctx, c.config.ExtractionWaitTimeout)
-	_, waitErr := c.scheduler.Wait(waitCtx)
+	waited, waitErr := c.scheduler.Wait(waitCtx)
 	cancel()
+	result.Warnings = append(result.Warnings, waited.Warnings...)
 	if waitErr != nil {
 		result.Warnings = append(result.Warnings, fmt.Errorf("wait for session memory update: %w", waitErr))
 	}
