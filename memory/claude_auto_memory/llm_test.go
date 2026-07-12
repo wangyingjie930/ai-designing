@@ -116,6 +116,25 @@ func TestLLMSessionSummarizerUsesIsolatedPrompt(t *testing.T) {
 	}
 }
 
+// TestLLMSessionSummarizerStripsMarkdownFence 验证常见模型围栏不会污染持久化摘要。
+func TestLLMSessionSummarizerStripsMarkdownFence(t *testing.T) {
+	summary := strings.Replace(defaultSessionMemoryTemplate, "# 当前状态\n", "# 当前状态\n正在更新。\n", 1)
+	fake := &staticChatModel{contents: []string{"```markdown\n" + summary + "```"}}
+	summarizer, err := NewLLMSessionSummarizer(fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := summarizer.Summarize(context.Background(), defaultSessionMemoryTemplate, []ConversationMessage{
+		NewConversationMessage(RoleUser, "更新摘要"), NewConversationMessage(RoleAssistant, "收到"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated != summary {
+		t.Fatalf("updated = %q", updated)
+	}
+}
+
 // joinSchemaMessageContent 拼接模型消息正文，便于测试隔离 prompt 是否存在。
 func joinSchemaMessageContent(messages []*schema.Message) string {
 	var contents []string

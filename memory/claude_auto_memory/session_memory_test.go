@@ -146,3 +146,16 @@ func TestSessionUpdaterInitializesAtToolCallBoundary(t *testing.T) {
 		t.Fatalf("result = %+v calls = %d", result, model.Calls())
 	}
 }
+
+// TestRoughTokenEstimatorCountsCompactSummary 验证 Context 阈值包含实际占窗的 Session Summary。
+func TestRoughTokenEstimatorCountsCompactSummary(t *testing.T) {
+	estimator := RoughTokenEstimator{}
+	normal := NewConversationMessage(RoleUser, "继续")
+	summary := NewConversationMessage(RoleUser, strings.Repeat("会话摘要", 40))
+	summary.Kind = MessageKindCompactSummary
+	withoutSummary := estimator.Estimate([]ConversationMessage{normal})
+	withSummary := estimator.Estimate([]ConversationMessage{summary, normal})
+	if withSummary <= withoutSummary {
+		t.Fatalf("with summary = %d without summary = %d", withSummary, withoutSummary)
+	}
+}

@@ -132,7 +132,21 @@ func (s *LLMSessionSummarizer) Summarize(ctx context.Context, currentSummary str
 	if content == "" {
 		return "", errors.New("session memory model returned empty content")
 	}
-	return normalizeSessionSummary(content), nil
+	return normalizeSessionSummary(stripMarkdownFence(content)), nil
+}
+
+// stripMarkdownFence 容忍模型偶尔违约返回的 markdown 围栏，但不改写正文结构。
+func stripMarkdownFence(content string) string {
+	text := strings.TrimSpace(content)
+	if !strings.HasPrefix(text, "```") {
+		return text
+	}
+	firstNewline := strings.IndexByte(text, '\n')
+	lastFence := strings.LastIndex(text, "```")
+	if firstNewline < 0 || lastFence <= firstNewline {
+		return text
+	}
+	return strings.TrimSpace(text[firstNewline+1 : lastFence])
 }
 
 // NewLLMChatAgent 创建只负责业务回答的模型适配器。

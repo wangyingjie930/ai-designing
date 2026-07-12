@@ -15,9 +15,6 @@ type RoughTokenEstimator struct{}
 func (RoughTokenEstimator) Estimate(messages []ConversationMessage) int {
 	total := 0
 	for _, message := range messages {
-		if message.Kind != "" && message.Kind != MessageKindNormal {
-			continue
-		}
 		total += (utf8.RuneCountInString(message.Content)+3)/4 + 4
 	}
 	return total
