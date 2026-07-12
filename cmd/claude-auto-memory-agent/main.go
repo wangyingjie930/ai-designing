@@ -13,6 +13,7 @@ import (
 
 	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/components/model"
+	"github.com/google/uuid"
 
 	"ai-designing/cmd/internal/e2etest"
 	claudeautomemory "ai-designing/memory/claude_auto_memory"
@@ -27,10 +28,13 @@ const (
 
 // runConfig 保存自动记忆面试命令的文件路径和运行模式。
 type runConfig struct {
-	EnvPath     string
-	MemoryDir   string
-	RoundsFile  string
-	PrepareOnly bool
+	EnvPath       string
+	MemoryDir     string
+	RoundsFile    string
+	PrepareOnly   bool
+	SessionID     string
+	Resume        bool
+	SessionConfig claudeautomemory.SessionMemoryConfig
 }
 
 // modelConfig 保存 OpenAI-compatible 模型连接信息。
@@ -42,13 +46,17 @@ type modelConfig struct {
 
 // runOutput 是命令执行后的低敏摘要，测试和 trace 不依赖完整业务文本。
 type runOutput struct {
-	Mode        string `json:"mode"`
-	MemoryDir   string `json:"memory_dir"`
-	Rounds      int    `json:"rounds"`
-	Recalled    int    `json:"recalled"`
-	Written     int    `json:"written"`
-	Warnings    int    `json:"warnings"`
-	AnswerChars int    `json:"answer_chars"`
+	Mode           string `json:"mode"`
+	MemoryDir      string `json:"memory_dir"`
+	SessionID      string `json:"session_id"`
+	Resumed        bool   `json:"resumed"`
+	Rounds         int    `json:"rounds"`
+	Recalled       int    `json:"recalled"`
+	Written        int    `json:"written"`
+	SessionUpdates int    `json:"session_updates"`
+	Compactions    int    `json:"compactions"`
+	Warnings       int    `json:"warnings"`
+	AnswerChars    int    `json:"answer_chars"`
 }
 
 // chatModelFactory 允许命令测试替换真实模型而不访问网络。
@@ -68,7 +76,7 @@ func main() {
 	}
 }
 
-// runAgent 组装 Store、三个隔离模型角色和固定顺序 Runner。
+// runAgent 组装 Auto/Session Store、四个隔离模型角色和固定顺序 Runner。
 func runAgent(ctx context.Context, args []string) (runOutput, error) {
 	config, err := parseRunConfig(args)
 	if err != nil {
@@ -78,10 +86,29 @@ func runAgent(ctx context.Context, args []string) (runOutput, error) {
 	if err != nil {
 		return runOutput{}, fmt.Errorf("init memory store: %w", err)
 	}
+	transcriptStore, err := claudeautomemory.NewTranscriptStore(config.MemoryDir, config.SessionID)
+	if err != nil {
+		return runOutput{}, fmt.Errorf("init transcript store: %w", err)
+	}
+	sessionStore, err := claudeautomemory.NewSessionStore(config.MemoryDir, config.SessionID)
+	if err != nil {
+		return runOutput{}, fmt.Errorf("init session memory store: %w", err)
+	}
+	existingTranscript, err := transcriptStore.Load(ctx)
+	if err != nil {
+		return runOutput{}, fmt.Errorf("load transcript: %w", err)
+	}
+	if config.Resume && len(existingTranscript) == 0 {
+		return runOutput{}, errors.New("cannot resume an empty session")
+	}
+	if !config.Resume && len(existingTranscript) > 0 {
+		return runOutput{}, errors.New("session already exists; pass -resume to continue it")
+	}
 	if config.PrepareOnly {
-		output := runOutput{Mode: "prepare-only", MemoryDir: config.MemoryDir}
-		fmt.Printf("mode=%s memory_dir=%s\n", output.Mode, output.MemoryDir)
+		output := runOutput{Mode: "prepare-only", MemoryDir: config.MemoryDir, SessionID: config.SessionID}
+		fmt.Printf("mode=%s memory_dir=%s session_id=%s\n", output.Mode, output.MemoryDir, output.SessionID)
 		fmt.Println("indexes=private/MEMORY.md,team/MEMORY.md")
+		fmt.Printf("session_summary=%s\n", sessionStore.SummaryPath())
 		return output, nil
 	}
 
@@ -97,17 +124,17 @@ func runAgent(ctx context.Context, args []string) (runOutput, error) {
 	if err != nil {
 		return runOutput{}, fmt.Errorf("init chat model: %w", err)
 	}
-	runner, err := buildRunner(store, chatModel)
+	runner, err := buildRunner(ctx, store, transcriptStore, sessionStore, config, chatModel)
 	if err != nil {
 		return runOutput{}, err
 	}
 	fmt.Printf("model=%s base_url=%s api_key=%s\n", connection.Model, displayBaseURL(connection.BaseURL), redactKey(connection.APIKey))
-	fmt.Printf("memory_dir=%s rounds=%d\n", store.Root(), len(rounds))
-	return runRounds(ctx, config.MemoryDir, runner, rounds)
+	fmt.Printf("memory_dir=%s session_id=%s resumed=%t rounds=%d\n", store.Root(), config.SessionID, config.Resume, len(rounds))
+	return runRounds(ctx, config.MemoryDir, runner, rounds, config.Resume)
 }
 
-// buildRunner 让同一个模型通过隔离 prompt 承担提取、选择和业务回答三个角色。
-func buildRunner(store *claudeautomemory.Store, chatModel model.BaseChatModel) (*claudeautomemory.Runner, error) {
+// buildRunner 让同一个底层模型通过隔离 Prompt 承担四个互不串线的角色。
+func buildRunner(ctx context.Context, store *claudeautomemory.Store, transcriptStore *claudeautomemory.TranscriptStore, sessionStore *claudeautomemory.SessionStore, config runConfig, chatModel model.BaseChatModel) (*claudeautomemory.Runner, error) {
 	extractorModel, err := claudeautomemory.NewLLMExtractor(chatModel)
 	if err != nil {
 		return nil, err
@@ -128,12 +155,32 @@ func buildRunner(store *claudeautomemory.Store, chatModel model.BaseChatModel) (
 	if err != nil {
 		return nil, err
 	}
-	return claudeautomemory.NewRunner(recaller, chatAgent, extractor)
+	sessionSummarizer, err := claudeautomemory.NewLLMSessionSummarizer(chatModel)
+	if err != nil {
+		return nil, err
+	}
+	estimator := claudeautomemory.RoughTokenEstimator{}
+	updater, err := claudeautomemory.NewSessionMemoryUpdater(sessionStore, sessionSummarizer, estimator, config.SessionConfig)
+	if err != nil {
+		return nil, err
+	}
+	sessionScheduler, err := claudeautomemory.NewSessionScheduler(updater)
+	if err != nil {
+		return nil, err
+	}
+	compactor, err := claudeautomemory.NewSessionCompactor(sessionStore, sessionScheduler, estimator, config.SessionConfig)
+	if err != nil {
+		return nil, err
+	}
+	return claudeautomemory.NewRunnerWithSession(ctx, recaller, chatAgent, extractor, claudeautomemory.RunnerSessionConfig{
+		SessionID: config.SessionID, TranscriptStore: transcriptStore,
+		Scheduler: sessionScheduler, Compactor: compactor, Resume: config.Resume,
+	})
 }
 
 // runRounds 顺序执行多轮对话，并只输出可面试解释的记忆边界 trace。
-func runRounds(ctx context.Context, memoryDir string, runner *claudeautomemory.Runner, rounds []string) (runOutput, error) {
-	output := runOutput{Mode: "agent", MemoryDir: memoryDir, Rounds: len(rounds)}
+func runRounds(ctx context.Context, memoryDir string, runner *claudeautomemory.Runner, rounds []string, resumed bool) (runOutput, error) {
+	output := runOutput{Mode: "agent", MemoryDir: memoryDir, SessionID: runner.SessionID(), Resumed: resumed, Rounds: len(rounds)}
 	for index, message := range rounds {
 		result, err := runner.RunTurn(ctx, message)
 		if err != nil {
@@ -141,6 +188,7 @@ func runRounds(ctx context.Context, memoryDir string, runner *claudeautomemory.R
 		}
 		fmt.Printf("\n=== Round %d ===\nuser: %s\nassistant: %s\n", index+1, message, result.Answer)
 		fmt.Printf("recalled=%s\n", formatRecords(result.Recalled))
+		fmt.Printf("compacted=%t\n", result.Compacted)
 		for _, warning := range result.Warnings {
 			fmt.Printf("memory_warning=%v\n", warning)
 		}
@@ -159,7 +207,25 @@ func runRounds(ctx context.Context, memoryDir string, runner *claudeautomemory.R
 			output.Written += len(drained.Written)
 			output.Warnings += len(drained.Warnings)
 		}
+		// Session Summary 与 Auto Memory 独立等待和计数，避免把两种生命周期混成一个结果。
+		sessionCtx, cancelSession := context.WithTimeout(ctx, extractionDrainTimeout)
+		sessionDrained, sessionErr := runner.WaitSession(sessionCtx)
+		cancelSession()
+		if sessionErr != nil {
+			fmt.Printf("session_updated=false\nmemory_warning=wait session memory: %v\n", sessionErr)
+			output.Warnings++
+		} else {
+			fmt.Printf("session_updated=%t summarized_through=%s\n", sessionDrained.Updates > 0, shortMessageID(sessionDrained.SummarizedThrough))
+			for _, warning := range sessionDrained.Warnings {
+				fmt.Printf("memory_warning=%v\n", warning)
+			}
+			output.SessionUpdates += sessionDrained.Updates
+			output.Warnings += len(sessionDrained.Warnings)
+		}
 		output.Recalled += len(result.Recalled)
+		if result.Compacted {
+			output.Compactions++
+		}
 		output.Warnings += len(result.Warnings)
 		output.AnswerChars += len([]rune(result.Answer))
 	}
@@ -170,21 +236,39 @@ func runRounds(ctx context.Context, memoryDir string, runner *claudeautomemory.R
 func parseRunConfig(args []string) (runConfig, error) {
 	fs := flag.NewFlagSet("claude-auto-memory-agent", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	config := runConfig{}
+	config := runConfig{SessionConfig: claudeautomemory.DefaultSessionMemoryConfig()}
 	fs.StringVar(&config.EnvPath, "env-file", defaultEnvPath, "dotenv file containing model config")
 	fs.StringVar(&config.MemoryDir, "memory-dir", defaultMemoryDir, "private/team Markdown memory root")
 	fs.StringVar(&config.RoundsFile, "rounds-file", defaultRoundsPath, "multi-round interview scenario")
 	fs.BoolVar(&config.PrepareOnly, "prepare-only", false, "create and inspect memory storage without calling a model")
+	fs.StringVar(&config.SessionID, "session-id", "", "stable session identifier; generated when omitted")
+	fs.BoolVar(&config.Resume, "resume", false, "resume an existing session transcript and summary")
+	fs.IntVar(&config.SessionConfig.MinimumTokensToInit, "session-init-tokens", config.SessionConfig.MinimumTokensToInit, "tokens required for the first session summary")
+	fs.IntVar(&config.SessionConfig.MinimumTokensBetweenUpdates, "session-update-tokens", config.SessionConfig.MinimumTokensBetweenUpdates, "token growth required between session updates")
+	fs.IntVar(&config.SessionConfig.CompactTokens, "compact-tokens", config.SessionConfig.CompactTokens, "context tokens that trigger session compaction")
+	fs.IntVar(&config.SessionConfig.MinimumRecentMessages, "session-recent-messages", config.SessionConfig.MinimumRecentMessages, "minimum recent messages preserved after compaction")
 	if err := fs.Parse(args); err != nil {
 		return runConfig{}, err
 	}
 	config.EnvPath = e2etest.ResolvePath(config.EnvPath)
 	config.MemoryDir = e2etest.ResolvePath(config.MemoryDir)
 	config.RoundsFile = e2etest.ResolvePath(config.RoundsFile)
+	config.SessionID = strings.TrimSpace(config.SessionID)
+	if config.SessionID == "" {
+		config.SessionID = uuid.NewString()
+	}
 	if err := loadDotEnv(config.EnvPath); err != nil {
 		return runConfig{}, fmt.Errorf("load env: %w", err)
 	}
 	return config, nil
+}
+
+// shortMessageID 只在 trace 中暴露 UUID 前八位，完整边界仍保存在 state.json。
+func shortMessageID(messageID string) string {
+	if len(messageID) <= 8 {
+		return messageID
+	}
+	return messageID[:8]
 }
 
 // loadRoundMessages 读取默认或用户指定的多轮面试输入。

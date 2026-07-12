@@ -16,12 +16,12 @@ import (
 func TestRunAgentPrepareOnlyCreatesStorageWithoutModel(t *testing.T) {
 	memoryDir := filepath.Join(t.TempDir(), "memory")
 	output, err := runAgent(context.Background(), []string{
-		"-prepare-only", "-memory-dir", memoryDir, "-env-file", filepath.Join(t.TempDir(), ".env"),
+		"-prepare-only", "-memory-dir", memoryDir, "-session-id", "prepare-session", "-env-file", filepath.Join(t.TempDir(), ".env"),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if output.Mode != "prepare-only" || output.MemoryDir != memoryDir {
+	if output.Mode != "prepare-only" || output.MemoryDir != memoryDir || output.SessionID != "prepare-session" {
 		t.Fatalf("output = %+v", output)
 	}
 	for _, path := range []string{filepath.Join(memoryDir, "MEMORY.md"), filepath.Join(memoryDir, "team", "MEMORY.md")} {
@@ -29,10 +29,18 @@ func TestRunAgentPrepareOnlyCreatesStorageWithoutModel(t *testing.T) {
 			t.Fatalf("expected index %s: %v", path, err)
 		}
 	}
+	for _, path := range []string{
+		filepath.Join(memoryDir, "sessions", "prepare-session", "session-memory", "summary.md"),
+		filepath.Join(memoryDir, "sessions", "prepare-session", "session-memory", "state.json"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected session file %s: %v", path, err)
+		}
+	}
 }
 
-// TestRunAgentUsesOneModelForThreeIsolatedRoles 验证命令装配真实三阶段并跑通三轮闭环。
-func TestRunAgentUsesOneModelForThreeIsolatedRoles(t *testing.T) {
+// TestRunAgentUsesOneModelForFourIsolatedRoles 验证命令装配回答、召回、长期提取和 Session 摘要四个角色。
+func TestRunAgentUsesOneModelForFourIsolatedRoles(t *testing.T) {
 	oldFactory := newChatModel
 	scripted := &interviewScriptModel{}
 	newChatModel = func(context.Context, modelConfig) (model.BaseChatModel, error) {
@@ -49,15 +57,30 @@ func TestRunAgentUsesOneModelForThreeIsolatedRoles(t *testing.T) {
 	memoryDir := filepath.Join(t.TempDir(), "memory")
 	output, err := runAgent(context.Background(), []string{
 		"-env-file", envPath, "-memory-dir", memoryDir, "-rounds-file", roundsPath,
+		"-session-id", "interview", "-session-init-tokens", "1", "-session-update-tokens", "1",
+		"-compact-tokens", "1", "-session-recent-messages", "1",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if output.Rounds != 3 || output.Written != 2 || output.Recalled != 3 || output.AnswerChars == 0 {
+	if output.Rounds != 3 || output.Written != 2 || output.Recalled != 3 || output.AnswerChars == 0 || output.SessionID != "interview" {
 		t.Fatalf("output = %+v", output)
 	}
+	if output.SessionUpdates != 3 || output.Compactions != 2 || scripted.sessionCalls != 3 {
+		t.Fatalf("output=%+v session calls=%d", output, scripted.sessionCalls)
+	}
 	if scripted.extractCalls != 3 || scripted.selectCalls != 3 || scripted.mainCalls != 3 {
-		t.Fatalf("calls extract=%d select=%d main=%d", scripted.extractCalls, scripted.selectCalls, scripted.mainCalls)
+		t.Fatalf("calls extract=%d select=%d main=%d session=%d", scripted.extractCalls, scripted.selectCalls, scripted.mainCalls, scripted.sessionCalls)
+	}
+}
+
+// TestRunAgentResumeRequiresExistingSession 验证显式 Resume 不会悄悄创建空白会话。
+func TestRunAgentResumeRequiresExistingSession(t *testing.T) {
+	_, err := runAgent(context.Background(), []string{
+		"-resume", "-session-id", "missing", "-memory-dir", t.TempDir(), "-env-file", filepath.Join(t.TempDir(), ".env"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot resume") {
+		t.Fatalf("err = %v", err)
 	}
 }
 
@@ -78,6 +101,7 @@ type interviewScriptModel struct {
 	extractCalls int
 	selectCalls  int
 	mainCalls    int
+	sessionCalls int
 }
 
 // Generate 为选择、回答、提取三类调用返回确定性脚本。
@@ -87,6 +111,9 @@ func (m *interviewScriptModel) Generate(_ context.Context, input []*schema.Messa
 	}
 	system := input[0].Content
 	switch {
+	case strings.Contains(system, "[SESSION_MEMORY_UPDATE]"):
+		m.sessionCalls++
+		return schema.AssistantMessage(testSessionSummary, nil), nil
 	case strings.Contains(system, "[AUTO_MEMORY_SELECT]"):
 		m.selectCalls++
 		switch m.selectCalls {
@@ -114,6 +141,37 @@ func (m *interviewScriptModel) Generate(_ context.Context, input []*schema.Messa
 		return nil, fmt.Errorf("unknown system prompt: %s", system)
 	}
 }
+
+const testSessionSummary = `# 会话标题
+自动记忆面试演示
+
+# 当前状态
+正在运行多轮 Session Memory 演示。
+
+# 任务要求
+验证长期记忆和会话摘要协作。
+
+# 重要文件与函数
+Runner 负责编排双后台链路。
+
+# 工作流程
+每轮回答后等待脚本后台任务。
+
+# 错误与修正
+暂无。
+
+# 系统结构
+Transcript 与 Context 分离。
+
+# 经验结论
+摘要不能进入长期记忆。
+
+# 关键结果
+下一轮可以继续任务。
+
+# 工作日志
+完成一轮摘要更新。
+`
 
 // Stream 满足 BaseChatModel；命令核心链路使用 Generate。
 func (m *interviewScriptModel) Stream(context.Context, []*schema.Message, ...model.Option) (*schema.StreamReader[*schema.Message], error) {
