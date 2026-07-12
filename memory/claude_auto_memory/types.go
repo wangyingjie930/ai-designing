@@ -1,6 +1,11 @@
 package claudeautomemory
 
-import "context"
+import (
+	"context"
+	"strings"
+
+	"github.com/google/uuid"
+)
 
 // MemoryType 表示 Claude 风格自动记忆的封闭语义分类。
 type MemoryType string
@@ -81,10 +86,38 @@ const (
 	RoleAssistant Role = "assistant"
 )
 
+// Valid 判断角色是否属于主会话允许持久化的封闭集合。
+func (r Role) Valid() bool {
+	return r == RoleUser || r == RoleAssistant
+}
+
+// MessageKind 区分真实对话事实与只用于模型上下文的派生消息。
+type MessageKind string
+
+const (
+	MessageKindNormal         MessageKind = "normal"
+	MessageKindCompactSummary MessageKind = "compact_summary"
+)
+
+// Valid 判断消息类型是否属于当前运行时支持的封闭集合。
+func (k MessageKind) Valid() bool {
+	return k == MessageKindNormal || k == MessageKindCompactSummary
+}
+
 // ConversationMessage 是主会话与提取器之间共享的最小消息契约。
 type ConversationMessage struct {
-	Role    Role   `json:"role"`
-	Content string `json:"content"`
+	ID            string      `json:"id"`
+	Role          Role        `json:"role"`
+	Content       string      `json:"content"`
+	Kind          MessageKind `json:"kind"`
+	ToolCallCount int         `json:"tool_call_count,omitempty"`
+}
+
+// NewConversationMessage 为真实主会话消息生成稳定 UUID，供 Transcript、摘要和抽取游标共享。
+func NewConversationMessage(role Role, content string) ConversationMessage {
+	return ConversationMessage{
+		ID: uuid.NewString(), Role: role, Content: strings.TrimSpace(content), Kind: MessageKindNormal,
+	}
 }
 
 // MemoryExtractor 让语义提取模型与确定性的游标、存储逻辑解耦。

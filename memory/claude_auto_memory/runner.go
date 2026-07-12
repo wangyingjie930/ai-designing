@@ -45,7 +45,7 @@ func (r *Runner) RunTurn(ctx context.Context, userInput string) (TurnResult, err
 	// 业务边界一：只为当前问题召回相关长期记忆，不把全部记忆塞入模型。
 	recall := r.recaller.Recall(ctx, userInput)
 	pending := append([]ConversationMessage(nil), r.history...)
-	pending = append(pending, ConversationMessage{Role: RoleUser, Content: userInput})
+	pending = append(pending, NewConversationMessage(RoleUser, userInput))
 	// 业务边界二：主 Agent 看不到提取器 prompt、候选索引和存储维护过程。
 	answer, err := r.chat.Generate(ctx, pending, recall.Context)
 	if err != nil {
@@ -55,7 +55,7 @@ func (r *Runner) RunTurn(ctx context.Context, userInput string) (TurnResult, err
 	if answer == "" {
 		return TurnResult{}, errors.New("main chat agent returned an empty answer")
 	}
-	r.history = append(pending, ConversationMessage{Role: RoleAssistant, Content: answer})
+	r.history = append(pending, NewConversationMessage(RoleAssistant, answer))
 	// 业务边界三：只提交会话快照，后台模型和文件 I/O 不进入主回答延迟。
 	r.scheduler.Schedule(ctx, r.history)
 	return TurnResult{

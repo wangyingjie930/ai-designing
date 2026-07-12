@@ -8,10 +8,10 @@ import (
 
 // Extractor 维护已处理消息游标，并把模型候选逐条交给安全存储层。
 type Extractor struct {
-	store  *Store
-	model  MemoryExtractor
-	cursor int
-	mu     sync.Mutex
+	store                  *Store
+	model                  MemoryExtractor
+	lastExtractedMessageID string
+	mu                     sync.Mutex
 }
 
 // NewExtractor 创建回答后提取器，拒绝缺失的存储或模型依赖。
@@ -29,13 +29,13 @@ func NewExtractor(store *Store, model MemoryExtractor) (*Extractor, error) {
 func (e *Extractor) ExtractNew(ctx context.Context, history []ConversationMessage) ExtractionResult {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.cursor > len(history) {
-		return ExtractionResult{Warnings: []error{errors.New("conversation history is shorter than extraction cursor")}}
+	batch, lastMessageID, err := messagesAfterCursor(history, e.lastExtractedMessageID)
+	if err != nil {
+		return ExtractionResult{Warnings: []error{err}}
 	}
-	if e.cursor == len(history) {
+	if len(batch) == 0 {
 		return ExtractionResult{}
 	}
-	batch := append([]ConversationMessage(nil), history[e.cursor:]...)
 	candidates, err := e.model.Extract(ctx, batch)
 	if err != nil {
 		return ExtractionResult{Warnings: []error{err}}
@@ -50,13 +50,44 @@ func (e *Extractor) ExtractNew(ctx context.Context, history []ConversationMessag
 		result.Written = append(result.Written, record)
 	}
 	// 整个模型批次已经完成后才推进，单条坏候选不会让旧消息被无限重复提取。
-	e.cursor = len(history)
+	e.lastExtractedMessageID = lastMessageID
 	return result
 }
 
-// Cursor 返回当前已处理消息数量，主要用于生命周期诊断和测试。
-func (e *Extractor) Cursor() int {
+// Cursor 返回最后成功处理的真实消息 UUID，主要用于生命周期诊断和测试。
+func (e *Extractor) Cursor() string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.cursor
+	return e.lastExtractedMessageID
+}
+
+// messagesAfterCursor 从完整 Transcript 中选择游标之后的真实消息，并排除 Compact 摘要。
+func messagesAfterCursor(history []ConversationMessage, cursor string) ([]ConversationMessage, string, error) {
+	start := 0
+	if cursor != "" {
+		start = -1
+		for index, message := range history {
+			if message.ID == cursor {
+				start = index + 1
+				break
+			}
+		}
+		if start < 0 {
+			return nil, "", errors.New("extraction cursor is missing from transcript")
+		}
+	}
+	batch := make([]ConversationMessage, 0, len(history)-start)
+	lastMessageID := cursor
+	for _, message := range history[start:] {
+		// 空 Kind 只用于兼容旧测试和旧调用方；新建消息始终显式标记 normal。
+		if message.Kind != "" && message.Kind != MessageKindNormal {
+			continue
+		}
+		if message.ID == "" {
+			return nil, "", errors.New("conversation message ID is required for extraction")
+		}
+		batch = append(batch, message)
+		lastMessageID = message.ID
+	}
+	return batch, lastMessageID, nil
 }

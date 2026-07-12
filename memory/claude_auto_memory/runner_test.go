@@ -144,7 +144,7 @@ func TestRunnerSkipsExtractionWhenMainAgentFails(t *testing.T) {
 	if _, err := runner.RunTurn(context.Background(), "问题"); err == nil {
 		t.Fatal("expected main agent error")
 	}
-	if len(extractorModel.inputs) != 0 || extractor.Cursor() != 0 || len(runner.History()) != 0 {
-		t.Fatalf("extract inputs = %+v cursor = %d history = %+v", extractorModel.inputs, extractor.Cursor(), runner.History())
+	if len(extractorModel.inputs) != 0 || extractor.Cursor() != "" || len(runner.History()) != 0 {
+		t.Fatalf("extract inputs = %+v cursor = %q history = %+v", extractorModel.inputs, extractor.Cursor(), runner.History())
 	}
 }

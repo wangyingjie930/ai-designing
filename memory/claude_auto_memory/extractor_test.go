@@ -41,20 +41,44 @@ func TestExtractorProcessesOnlyNewMessages(t *testing.T) {
 		t.Fatal(err)
 	}
 	history := []ConversationMessage{
-		{Role: RoleUser, Content: "记住我喜欢中文注释"},
-		{Role: RoleAssistant, Content: "好的"},
+		NewConversationMessage(RoleUser, "记住我喜欢中文注释"),
+		NewConversationMessage(RoleAssistant, "好的"),
 	}
 	first := extractor.ExtractNew(context.Background(), history)
 	if len(first.Written) != 1 || first.ProcessedMessages != 2 {
 		t.Fatalf("first = %+v", first)
 	}
 	history = append(history,
-		ConversationMessage{Role: RoleUser, Content: "继续"},
-		ConversationMessage{Role: RoleAssistant, Content: "收到"},
+		NewConversationMessage(RoleUser, "继续"),
+		NewConversationMessage(RoleAssistant, "收到"),
 	)
 	second := extractor.ExtractNew(context.Background(), history)
 	if second.ProcessedMessages != 2 || len(fake.inputs) != 2 || len(fake.inputs[1]) != 2 {
 		t.Fatalf("second = %+v, inputs = %+v", second, fake.inputs)
+	}
+}
+
+// TestExtractorUsesUUIDCursorAndIgnoresCompactSummary 验证压缩上下文不会污染长期记忆或破坏增量边界。
+func TestExtractorUsesUUIDCursorAndIgnoresCompactSummary(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeMemoryExtractor{batches: [][]MemoryCandidate{{}}}
+	extractor, err := NewExtractor(store, fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := NewConversationMessage(RoleUser, "记住中文注释")
+	summary := NewConversationMessage(RoleUser, "当前正在处理临时任务")
+	summary.Kind = MessageKindCompactSummary
+	last := NewConversationMessage(RoleAssistant, "好的")
+	result := extractor.ExtractNew(context.Background(), []ConversationMessage{first, summary, last})
+	if result.ProcessedMessages != 2 || len(fake.inputs) != 1 || len(fake.inputs[0]) != 2 {
+		t.Fatalf("result = %+v inputs = %+v", result, fake.inputs)
+	}
+	if extractor.Cursor() != last.ID {
+		t.Fatalf("cursor = %q want %q", extractor.Cursor(), last.ID)
 	}
 }
 
@@ -69,16 +93,16 @@ func TestExtractorRetriesAfterModelFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	history := []ConversationMessage{{Role: RoleUser, Content: "记住这个"}}
+	history := []ConversationMessage{NewConversationMessage(RoleUser, "记住这个")}
 	result := extractor.ExtractNew(context.Background(), history)
-	if result.ProcessedMessages != 0 || len(result.Warnings) != 1 || extractor.Cursor() != 0 {
-		t.Fatalf("result = %+v cursor = %d", result, extractor.Cursor())
+	if result.ProcessedMessages != 0 || len(result.Warnings) != 1 || extractor.Cursor() != "" {
+		t.Fatalf("result = %+v cursor = %q", result, extractor.Cursor())
 	}
 	fake.err = nil
 	fake.batches = [][]MemoryCandidate{{}}
 	retry := extractor.ExtractNew(context.Background(), history)
-	if retry.ProcessedMessages != 1 || extractor.Cursor() != 1 {
-		t.Fatalf("retry = %+v cursor = %d", retry, extractor.Cursor())
+	if retry.ProcessedMessages != 1 || extractor.Cursor() != history[0].ID {
+		t.Fatalf("retry = %+v cursor = %q", retry, extractor.Cursor())
 	}
 }
 
@@ -96,7 +120,7 @@ func TestExtractorKeepsValidCandidatesWhenOneCandidateFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result := extractor.ExtractNew(context.Background(), []ConversationMessage{{Role: RoleUser, Content: "团队约定"}})
+	result := extractor.ExtractNew(context.Background(), []ConversationMessage{NewConversationMessage(RoleUser, "团队约定")})
 	if len(result.Written) != 1 || len(result.Warnings) != 1 || result.ProcessedMessages != 1 {
 		t.Fatalf("result = %+v", result)
 	}

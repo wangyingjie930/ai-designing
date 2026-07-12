@@ -93,15 +93,16 @@ func TestExtractionSchedulerCoalescesBusyCallsToLatestSnapshot(t *testing.T) {
 	model := newBlockingExtractorModel()
 	extractor, _ := NewExtractor(store, model)
 	scheduler, _ := NewExtractionScheduler(extractor)
+	transcript := testConversation(6)
 
-	scheduler.Schedule(context.Background(), testConversation(2))
+	scheduler.Schedule(context.Background(), transcript[:2])
 	select {
 	case <-model.started:
 	case <-time.After(time.Second):
 		t.Fatal("first extraction did not start")
 	}
-	scheduler.Schedule(context.Background(), testConversation(4))
-	scheduler.Schedule(context.Background(), testConversation(6))
+	scheduler.Schedule(context.Background(), transcript[:4])
+	scheduler.Schedule(context.Background(), transcript)
 	close(model.release)
 	drained, err := scheduler.Drain(context.Background())
 	if err != nil {
@@ -124,7 +125,7 @@ func testConversation(count int) []ConversationMessage {
 		if index%2 == 1 {
 			role = RoleAssistant
 		}
-		messages = append(messages, ConversationMessage{Role: role, Content: string(rune('A' + index))})
+		messages = append(messages, NewConversationMessage(role, string(rune('A'+index))))
 	}
 	return messages
 }
