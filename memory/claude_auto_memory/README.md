@@ -1,4 +1,4 @@
-# Claude Code 风格自动记忆核心链路
+# Claude Code 风格自动记忆与任务跟踪核心链路
 
 这个包复刻 Claude Code Auto Memory 与 Session Memory 最适合面试讲解的核心闭环，不复用 `hierarchical_v1` 的 SQLite、五层状态和 retention 语义。
 
@@ -9,8 +9,10 @@
   -> Context 超阈值时压缩为 summary + 最近消息
   -> 读取 private/team MEMORY.md
   -> 选择最多 5 个相关主题
-  -> 注入主 Agent
-  -> 生成回答
+  -> 注入 Task Agent
+  -> TaskList / TaskCreate / TaskGet / TaskUpdate
+       └-> 更新 JSON Task List
+  -> 生成主回答和工具调用计数
   -> 立即返回/打印回答
        └-> 后台单实例提取新增对话
   -> 模型选择 type + scope
@@ -18,7 +20,17 @@
   -> 下一轮生效
 ```
 
-两个记忆系统并行工作：Auto Memory 保存跨会话仍有价值的稳定知识；Session Memory 保存当前任务现场，供 Compact 和 Resume 使用。Session Summary 不会自动晋升为长期记忆。
+两个记忆系统并行工作：Auto Memory 保存跨会话仍有价值的稳定知识；Session Memory 保存当前任务现场，供 Compact 和 Resume 使用。Session Summary 不会自动晋升为长期记忆。命令层另外装配独立的 JSON Task List，负责可机械读写的进度状态。
+
+## 三层独立状态
+
+| 状态层 | 保存内容 | 事实边界 |
+|---|---|---|
+| Transcript / Session Summary | 完整会话，以及为 Compact、Resume 派生的当前会话叙述摘要 | Transcript 保存真实对话；Session Summary 只是恢复上下文 |
+| Markdown Auto Memory | 跨会话仍稳定的用户偏好、反馈、项目知识和参考信息 | 主题 Markdown 与 `MEMORY.md` 索引是长期知识边界 |
+| JSON Task List | `pending`、`in_progress`、`completed`、负责人和任务依赖 | 任务 JSON 是机械进度真相，可由四个 Task 工具精确读写 |
+
+`sessions/<session-id>/session-memory/summary.md` 不是 Task 真相。摘要或最终回答可以概括进度，但不能反向创建、覆盖或完成任务；任务状态只以 `tasks/<task-list-id>/` 下的 JSON 文件为准。
 
 ## 快速运行
 
@@ -69,6 +81,8 @@ go run ./cmd/claude-auto-memory-agent \
   -resume
 ```
 
+`-resume` 必须复用相同的 `-memory-dir` 和 `-session-id`。默认 `task-list-id` 就是 `session-id`，因此恢复时 Task Agent 直接读取原 Task List，不根据 Transcript 或 `summary.md` 重放、推断任务状态。
+
 默认输入位于 `examples/interview_rounds.txt`，也可以用 `-rounds-file` 替换。文件支持 JSON 字符串数组，或用单独一行 `---` 分隔多轮消息。
 
 ### 运行时语义
@@ -77,8 +91,12 @@ go run ./cmd/claude-auto-memory-agent \
 - `ExtractionScheduler` 同时最多运行一个任务；繁忙时反复提交只保留最新会话快照，当前任务完成后执行一次 trailing extraction。
 - `SessionScheduler` 独立维护 `summary.md`，同样采用单实例、latest-wins 和 trailing update。
 - `SessionCompactor` 只裁剪 Context View；完整 Transcript 永远只追加，因此两个后台系统不会因 Compact 丢失事实输入。
+- `taskChatAgent` 把 Compact 后的 Context View 和 Auto Memory 召回结果交给 `claude_tasklist.Agent`；Task Agent 通过真实工具循环读写独立 Task Store，不在 `claude_auto_memory` 包内维护第二份任务状态。
+- Task Agent 返回本轮工具调用数量；`Runner` 把它写入 assistant Transcript，供 Session Memory 的工具调用阈值统计使用。工具参数和结果不写进长期 Auto Memory topic。
 - `Runner.Drain` 只等待 Auto Memory，`Runner.WaitSession` 只等待 Session Memory，避免混淆生命周期。
 - 默认 CLI 是脚本模式：每轮先把 assistant 回答写到 stdout，再等待两个后台系统，保证下一轮演示稳定。这个等待不属于交互主回答延迟。
+
+每轮低敏 trace 包含：`recalled`（召回条目）、`compacted`（本轮是否使用压缩上下文）、`tasks=pending:...,in_progress:...,completed:...`（Task Store 状态计数）、`task_tool_calls`（本轮 Task 工具调用数）、`written`（长期记忆写入）和 `session_updated` / `summarized_through`（Session Summary 进度）。异常以 `memory_warning` 输出；trace 不打印任务描述、工具参数或长期记忆正文。
 
 ## 落盘结构
 
@@ -89,15 +107,48 @@ go run ./cmd/claude-auto-memory-agent \
 ├── team/
     ├── MEMORY.md              # team 候选摘要
     └── tool-schema.md         # team 主题正文
-└── sessions/
+├── sessions/
     └── <session-id>/
         ├── transcript.jsonl   # 完整、只追加的真实会话
         └── session-memory/
-            ├── summary.md     # 当前任务结构化摘要
+            ├── summary.md     # 当前会话的结构化恢复摘要
             └── state.json     # UUID 摘要边界和 token 水位
+└── tasks/
+    └── <task-list-id>/        # 默认等于 session-id
+        ├── .highwatermark     # 单调任务 ID 水位，删除后也不回退
+        ├── 1.json             # 单个任务的完整机械状态
+        └── <id>.json
 ```
 
 主题文件使用 JSON frontmatter 加 Markdown 正文。JSON 是合法 YAML 子集，既可人工阅读，也能用 Go 标准库无损解析。
+
+Task Store 为每个任务保存独立 JSON 文件。`.highwatermark` 与 `<id>.json` 都使用同目录临时文件加 rename 原子替换，避免暴露单文件半写内容。
+
+## Task 工具与 CLI 主调用链
+
+四个模型工具共享同一个 Task Store：
+
+- `TaskCreate`：创建 `pending` 任务，写入标题、描述、进行中文案和可选 metadata。
+- `TaskGet`：按 ID 读取完整任务，包括描述、负责人、依赖和 metadata。
+- `TaskUpdate`：更新字段、状态、负责人或双向依赖；`status=deleted` 删除任务并清理依赖引用。
+- `TaskList`：按数字 ID 返回低成本摘要，并只展示尚未完成的 blocker。
+
+CLI 的实际组合链路是：
+
+```text
+cmd/claude-auto-memory-agent.runAgent
+  -> 创建 Auto Memory / Transcript / Session / Task Store
+  -> buildRunner 创建 claude_tasklist.Agent
+  -> taskChatAgent 适配 claude_auto_memory.ChatAgent
+  -> claude_auto_memory.Runner.RunTurn
+       -> Compact 后的 Context View + Auto Memory Recall
+       -> Task Agent ReAct 工具循环
+       -> Task JSON 落盘
+       -> assistant 正文 + tool_call_count 写入 Transcript
+       -> 调度 Session Summary 与 Auto Memory 后台更新
+```
+
+`-prepare-only` 也会初始化 Task Store，并输出 `tasks_dir`；普通模式每轮从同一 Store 读取任务计数。`memory/claude_auto_memory` 仍只负责对话、召回、摘要、Compact 和调度，Task 类型、工具和文件一致性由独立的 `memory/claude_tasklist` 包负责。
 
 ## 八个面试要点
 
@@ -127,6 +178,16 @@ go run ./cmd/claude-auto-memory-agent \
 | `session_store.go` / `session_prompts.go` | 固定摘要模板、状态和中文更新契约 |
 | `session_memory.go` / `session_scheduler.go` | 阈值更新、单实例和 latest-wins |
 | `session_compactor.go` | 等待摘要、验证 UUID 边界并裁剪 Context |
+
+任务跟踪的跨包职责：
+
+| Go 文件或目录 | 责任 |
+|---|---|
+| `memory/claude_tasklist/store*.go` | JSON 任务、单调 ID、依赖校验和进程内互斥 |
+| `memory/claude_tasklist/tools.go` | `TaskCreate`、`TaskGet`、`TaskUpdate`、`TaskList` 模型工具 |
+| `memory/claude_tasklist/agent.go` / `prompts.go` | Eino Task Agent 工具循环和中文进度规则 |
+| `cmd/claude-auto-memory-agent/task_chat.go` | Context View、长期记忆与 Task Agent 的薄适配 |
+| `cmd/claude-auto-memory-agent/main.go` | 四种 Store 的装配、Resume 和每轮低敏 trace |
 
 ## Claude Code 源码概念映射
 
@@ -169,7 +230,9 @@ env GOCACHE=/private/tmp/ai-designing-claude-auto-memory-gocache \
 
 - HTTP team sync、ETag、watcher 和跨设备一致性。
 - SQLite、embedding、向量库、遗忘曲线和层级晋升。
-- Redis/数据库 Checkpoint、多进程同时写同一 Session、完整工具循环、遥测和终端 UI。
+- Redis/数据库 Checkpoint、多进程同时写同一 Session、完整遥测和终端 UI。
 - Claude Code 的远程特性开关和逐 token 精确 tokenizer；MVP 使用稳定 rune 估算。
+- 跨进程文件锁和 team task coordination：当前互斥只覆盖同一进程内指向同一 Task List 的 Store；`owner` 只是数据字段，不包含 teammate 抢占、自动领取或 TeamCreate/TeamDelete 生命周期。
+- 多 JSON crash transaction：单个 `.highwatermark` 或任务文件会原子替换，但一次依赖更新可能顺序写多个 JSON；进程在批次中途崩溃时没有日志、回滚或事务恢复保证。
 
-这些外围能力不会改变核心面试主线：模型做语义选择，文件系统做确定性边界，索引降低召回成本，三个阶段互相隔离。
+这些外围能力不会改变核心面试主线：模型做语义选择，文件系统做确定性边界，索引降低召回成本，三种状态层保持独立。
