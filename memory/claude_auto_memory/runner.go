@@ -113,18 +113,23 @@ func (r *Runner) runAutoMemoryTurn(ctx context.Context, userInput string) (TurnR
 	recall := r.recaller.Recall(ctx, userInput)
 	pending := append([]ConversationMessage(nil), r.transcript...)
 	pending = append(pending, NewConversationMessage(RoleUser, userInput))
-	answer, err := r.chat.Generate(ctx, pending, recall.Context)
+	response, err := r.chat.Generate(ctx, pending, recall.Context)
 	if err != nil {
 		return TurnResult{}, err
 	}
-	answer = strings.TrimSpace(answer)
-	if answer == "" {
-		return TurnResult{}, errors.New("main chat agent returned an empty answer")
+	response, err = validateMainAgentResponse(response)
+	if err != nil {
+		return TurnResult{}, err
 	}
-	r.transcript = append(pending, NewConversationMessage(RoleAssistant, answer))
+	assistantMessage := NewConversationMessage(RoleAssistant, response.Content)
+	assistantMessage.ToolCallCount = response.ToolCallCount
+	r.transcript = append(pending, assistantMessage)
 	r.contextMessages = append([]ConversationMessage(nil), r.transcript...)
 	r.scheduler.Schedule(ctx, r.transcript)
-	return TurnResult{Answer: answer, Recalled: recall.Records, Warnings: append([]error(nil), recall.Warnings...)}, nil
+	return TurnResult{
+		Answer: response.Content, ToolCallCount: response.ToolCallCount,
+		Recalled: recall.Records, Warnings: append([]error(nil), recall.Warnings...),
+	}, nil
 }
 
 // runSessionTurn 先持久化真实输入，再 Compact Context，成功回答后并行调度两套记忆。
@@ -139,15 +144,16 @@ func (r *Runner) runSessionTurn(ctx context.Context, userInput string) (TurnResu
 	compactResult := r.compactor.MaybeCompact(ctx, pending, false)
 	r.contextMessages = compactResult.Messages
 	recall := r.recaller.Recall(ctx, userInput)
-	answer, err := r.chat.Generate(ctx, r.contextMessages, recall.Context)
+	response, err := r.chat.Generate(ctx, r.contextMessages, recall.Context)
 	if err != nil {
 		return TurnResult{}, err
 	}
-	answer = strings.TrimSpace(answer)
-	if answer == "" {
-		return TurnResult{}, errors.New("main chat agent returned an empty answer")
+	response, err = validateMainAgentResponse(response)
+	if err != nil {
+		return TurnResult{}, err
 	}
-	assistantMessage := NewConversationMessage(RoleAssistant, answer)
+	assistantMessage := NewConversationMessage(RoleAssistant, response.Content)
+	assistantMessage.ToolCallCount = response.ToolCallCount
 	if err := r.transcriptStore.Append(ctx, assistantMessage); err != nil {
 		return TurnResult{}, err
 	}
@@ -161,8 +167,21 @@ func (r *Runner) runSessionTurn(ctx context.Context, userInput string) (TurnResu
 	warnings = append(warnings, compactResult.Warnings...)
 	warnings = append(warnings, recall.Warnings...)
 	return TurnResult{
-		Answer: answer, Recalled: recall.Records, Compacted: compactResult.Compacted, Warnings: warnings,
+		Answer: response.Content, ToolCallCount: response.ToolCallCount,
+		Recalled: recall.Records, Compacted: compactResult.Compacted, Warnings: warnings,
 	}, nil
+}
+
+// validateMainAgentResponse 统一校验并归一化主 Agent 的正文与工具调用元数据。
+func validateMainAgentResponse(response ChatResponse) (ChatResponse, error) {
+	response.Content = strings.TrimSpace(response.Content)
+	if response.Content == "" {
+		return ChatResponse{}, errors.New("main chat agent returned an empty answer")
+	}
+	if response.ToolCallCount < 0 {
+		return ChatResponse{}, errors.New("main chat agent returned a negative tool call count")
+	}
+	return response, nil
 }
 
 // Drain 等待 Auto Memory 当前及 trailing 提取，保持原有生命周期契约。

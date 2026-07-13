@@ -158,7 +158,7 @@ func NewLLMChatAgent(chatModel model.BaseChatModel) (*LLMChatAgent, error) {
 }
 
 // Generate 把召回结果放在独立边界中，并保持调用方会话切片不变。
-func (a *LLMChatAgent) Generate(ctx context.Context, messages []ConversationMessage, memoryContext string) (string, error) {
+func (a *LLMChatAgent) Generate(ctx context.Context, messages []ConversationMessage, memoryContext string) (ChatResponse, error) {
 	input := []*schema.Message{schema.SystemMessage(mainAgentSystemPrompt())}
 	if strings.TrimSpace(memoryContext) != "" {
 		input = append(input, schema.SystemMessage("<memory_context>\n"+strings.TrimSpace(memoryContext)+"\n</memory_context>"))
@@ -170,18 +170,18 @@ func (a *LLMChatAgent) Generate(ctx context.Context, messages []ConversationMess
 		case RoleAssistant:
 			input = append(input, schema.AssistantMessage(message.Content, nil))
 		default:
-			return "", fmt.Errorf("unsupported conversation role %q", message.Role)
+			return ChatResponse{}, fmt.Errorf("unsupported conversation role %q", message.Role)
 		}
 	}
 	response, err := a.model.Generate(ctx, input)
 	if err != nil {
-		return "", fmt.Errorf("generate main answer: %w", err)
+		return ChatResponse{}, fmt.Errorf("generate main answer: %w", err)
 	}
 	content := messageContent(response)
 	if content == "" {
-		return "", errors.New("chat model returned empty content")
+		return ChatResponse{}, errors.New("chat model returned empty content")
 	}
-	return content, nil
+	return ChatResponse{Content: content}, nil
 }
 
 // decodeJSONPayload 兼容纯 JSON 和常见 Markdown fenced JSON 输出。

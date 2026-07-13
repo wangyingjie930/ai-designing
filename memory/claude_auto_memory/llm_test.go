@@ -82,9 +82,9 @@ func TestLLMChatAgentInjectsMemoryWithoutMutatingHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	history := []ConversationMessage{{Role: RoleUser, Content: "我的偏好是什么？"}}
-	answer, err := agent.Generate(context.Background(), history, "<memory scope=\"private\">中文注释</memory>")
-	if err != nil || answer == "" {
-		t.Fatalf("answer = %q, err = %v", answer, err)
+	response, err := agent.Generate(context.Background(), history, "<memory scope=\"private\">中文注释</memory>")
+	if err != nil || response.Content == "" || response.ToolCallCount != 0 {
+		t.Fatalf("response = %+v, err = %v", response, err)
 	}
 	if len(history) != 1 {
 		t.Fatalf("history was mutated: %+v", history)

@@ -152,15 +152,22 @@ type RecallResult struct {
 	Warnings []error
 }
 
-// ChatAgent 是只负责业务回答的主 Agent 边界，不暴露记忆维护 prompt。
-type ChatAgent interface {
-	Generate(ctx context.Context, messages []ConversationMessage, memoryContext string) (string, error)
+// ChatResponse 承载主 Agent 的最终正文和本轮真实工具调用次数。
+type ChatResponse struct {
+	Content       string
+	ToolCallCount int
 }
 
-// TurnResult 汇总立即可返回的主回答、当轮召回和召回降级警告。
+// ChatAgent 是只负责业务回答的主 Agent 边界，不暴露记忆维护 prompt。
+type ChatAgent interface {
+	Generate(ctx context.Context, messages []ConversationMessage, memoryContext string) (ChatResponse, error)
+}
+
+// TurnResult 汇总立即可返回的主回答、工具调用计数、当轮召回和召回降级警告。
 type TurnResult struct {
-	Answer    string
-	Recalled  []MemoryRecord
-	Compacted bool
-	Warnings  []error
+	Answer        string
+	ToolCallCount int
+	Recalled      []MemoryRecord
+	Compacted     bool
+	Warnings      []error
 }

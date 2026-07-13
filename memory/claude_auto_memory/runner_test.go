@@ -27,17 +27,17 @@ type recordingChatAgent struct {
 }
 
 // Generate 保存注入上下文，模拟独立主 Agent 回答。
-func (a *recordingChatAgent) Generate(_ context.Context, messages []ConversationMessage, memoryContext string) (string, error) {
+func (a *recordingChatAgent) Generate(_ context.Context, messages []ConversationMessage, memoryContext string) (ChatResponse, error) {
 	a.memoryContexts = append(a.memoryContexts, memoryContext)
 	a.histories = append(a.histories, append([]ConversationMessage(nil), messages...))
 	if a.err != nil {
-		return "", a.err
+		return ChatResponse{}, a.err
 	}
-	return "这是主 Agent 的回答。", nil
+	return ChatResponse{Content: "这是主 Agent 的回答。"}, nil
 }
 
 // newSessionRunnerForTest 装配共享 Transcript、Session Summary 和两个独立后台调度器。
-func newSessionRunnerForTest(t *testing.T, root, sessionID string, resume bool, chat *recordingChatAgent, extractorModel MemoryExtractor) (*Runner, *Extractor, *SessionStore) {
+func newSessionRunnerForTest(t *testing.T, root, sessionID string, resume bool, chat ChatAgent, extractorModel MemoryExtractor) (*Runner, *Extractor, *SessionStore) {
 	t.Helper()
 	autoStore, err := NewStore(root)
 	if err != nil {
