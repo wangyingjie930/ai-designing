@@ -103,7 +103,7 @@ func (a *Agent) Run(ctx context.Context, messages []*schema.Message) (AgentResul
 			continue
 		}
 		result.ToolCallCount += len(message.ToolCalls)
-		if strings.TrimSpace(message.Content) != "" {
+		if len(message.ToolCalls) == 0 && strings.TrimSpace(message.Content) != "" {
 			result.Content = message.Content
 		}
 	}

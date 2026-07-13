@@ -166,6 +166,31 @@ func TestAgentReturnsExactErrorWithoutFinalAssistantText(t *testing.T) {
 	}
 }
 
+// TestAgentDoesNotTreatToolCallContentAsFinalOutput 验证带工具调用的中间文案不能越过终态回答边界。
+func TestAgentDoesNotTreatToolCallContentAsFinalOutput(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(t.TempDir(), "agent-intermediate-content")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &taskAgentFakeModel{responses: []taskAgentFakeResponse{
+		{message: schema.AssistantMessage("正在处理", []schema.ToolCall{{
+			ID:       "list-with-content",
+			Function: schema.FunctionCall{Name: TaskListToolName, Arguments: `{}`},
+		}})},
+		{message: schema.AssistantMessage("   ", nil)},
+	}}
+	agent, err := NewAgent(ctx, AgentConfig{Model: fake, Store: store, MaxIterations: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = agent.Run(ctx, []*schema.Message{schema.UserMessage("查看并继续任务")})
+	if err == nil || err.Error() != "agent finished without assistant output" {
+		t.Fatalf("Run() error=%v", err)
+	}
+}
+
 // TestAgentRejectsEmptyMessages 验证调用方必须提供当前完整 Context View。
 func TestAgentRejectsEmptyMessages(t *testing.T) {
 	ctx := context.Background()
