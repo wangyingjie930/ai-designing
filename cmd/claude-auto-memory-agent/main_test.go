@@ -84,6 +84,23 @@ func TestRunAgentResumeRequiresExistingSession(t *testing.T) {
 	}
 }
 
+// TestParseRunConfigUsesOneClickSessionDemoDefaults 验证 GoLand 无参数运行可以稳定触发摘要和 Compact。
+func TestParseRunConfigUsesOneClickSessionDemoDefaults(t *testing.T) {
+	config, err := parseRunConfig([]string{"-env-file", filepath.Join(t.TempDir(), ".env")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.SessionID == "" {
+		t.Fatal("expected generated session ID")
+	}
+	if config.SessionConfig.MinimumTokensToInit != 1 ||
+		config.SessionConfig.MinimumTokensBetweenUpdates != 1 ||
+		config.SessionConfig.CompactTokens != 1 ||
+		config.SessionConfig.MinimumRecentMessages != 1 {
+		t.Fatalf("session config = %+v", config.SessionConfig)
+	}
+}
+
 // TestParseRoundMessages 验证面试场景既支持分隔文本，也支持 JSON 字符串数组。
 func TestParseRoundMessages(t *testing.T) {
 	rounds, err := parseRoundMessages("第一轮\n---\n第二轮\n---\n第三轮")
@@ -124,7 +141,7 @@ func (m *interviewScriptModel) Generate(_ context.Context, input []*schema.Messa
 		default:
 			return schema.AssistantMessage(`[{"scope":"private","topic":"comment-style"},{"scope":"team","topic":"tool-schema"}]`, nil), nil
 		}
-	case strings.Contains(system, "[AUTO_MEMORY_MAIN]"):
+	case strings.Contains(system, "[CLAUDE_TASK_AGENT]"):
 		m.mainCalls++
 		return schema.AssistantMessage(fmt.Sprintf("第 %d 轮回答。", m.mainCalls), nil), nil
 	case strings.Contains(system, "[AUTO_MEMORY_EXTRACT]"):

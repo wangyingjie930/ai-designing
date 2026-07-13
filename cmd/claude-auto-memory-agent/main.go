@@ -17,6 +17,7 @@ import (
 
 	"ai-designing/cmd/internal/e2etest"
 	claudeautomemory "ai-designing/memory/claude_auto_memory"
+	claudetasklist "ai-designing/memory/claude_tasklist"
 )
 
 const (
@@ -46,17 +47,22 @@ type modelConfig struct {
 
 // runOutput 是命令执行后的低敏摘要，测试和 trace 不依赖完整业务文本。
 type runOutput struct {
-	Mode           string `json:"mode"`
-	MemoryDir      string `json:"memory_dir"`
-	SessionID      string `json:"session_id"`
-	Resumed        bool   `json:"resumed"`
-	Rounds         int    `json:"rounds"`
-	Recalled       int    `json:"recalled"`
-	Written        int    `json:"written"`
-	SessionUpdates int    `json:"session_updates"`
-	Compactions    int    `json:"compactions"`
-	Warnings       int    `json:"warnings"`
-	AnswerChars    int    `json:"answer_chars"`
+	Mode            string `json:"mode"`
+	MemoryDir       string `json:"memory_dir"`
+	TasksDir        string `json:"tasks_dir"`
+	SessionID       string `json:"session_id"`
+	Resumed         bool   `json:"resumed"`
+	Rounds          int    `json:"rounds"`
+	Recalled        int    `json:"recalled"`
+	Written         int    `json:"written"`
+	SessionUpdates  int    `json:"session_updates"`
+	Compactions     int    `json:"compactions"`
+	PendingTasks    int    `json:"pending_tasks"`
+	InProgressTasks int    `json:"in_progress_tasks"`
+	CompletedTasks  int    `json:"completed_tasks"`
+	TaskToolCalls   int    `json:"task_tool_calls"`
+	Warnings        int    `json:"warnings"`
+	AnswerChars     int    `json:"answer_chars"`
 }
 
 // chatModelFactory 允许命令测试替换真实模型而不访问网络。
@@ -94,6 +100,10 @@ func runAgent(ctx context.Context, args []string) (runOutput, error) {
 	if err != nil {
 		return runOutput{}, fmt.Errorf("init session memory store: %w", err)
 	}
+	taskStore, err := claudetasklist.NewStore(config.MemoryDir, config.SessionID)
+	if err != nil {
+		return runOutput{}, fmt.Errorf("init task store: %w", err)
+	}
 	existingTranscript, err := transcriptStore.Load(ctx)
 	if err != nil {
 		return runOutput{}, fmt.Errorf("load transcript: %w", err)
@@ -105,10 +115,11 @@ func runAgent(ctx context.Context, args []string) (runOutput, error) {
 		return runOutput{}, errors.New("session already exists; pass -resume to continue it")
 	}
 	if config.PrepareOnly {
-		output := runOutput{Mode: "prepare-only", MemoryDir: config.MemoryDir, SessionID: config.SessionID}
+		output := runOutput{Mode: "prepare-only", MemoryDir: config.MemoryDir, TasksDir: taskStore.Dir(), SessionID: config.SessionID}
 		fmt.Printf("mode=%s memory_dir=%s session_id=%s\n", output.Mode, output.MemoryDir, output.SessionID)
 		fmt.Println("indexes=private/MEMORY.md,team/MEMORY.md")
 		fmt.Printf("session_summary=%s\n", sessionStore.SummaryPath())
+		fmt.Printf("tasks_dir=%s\n", taskStore.Dir())
 		return output, nil
 	}
 
@@ -124,17 +135,18 @@ func runAgent(ctx context.Context, args []string) (runOutput, error) {
 	if err != nil {
 		return runOutput{}, fmt.Errorf("init chat model: %w", err)
 	}
-	runner, err := buildRunner(ctx, store, transcriptStore, sessionStore, config, chatModel)
+	runner, err := buildRunner(ctx, store, transcriptStore, sessionStore, taskStore, config, chatModel)
 	if err != nil {
 		return runOutput{}, err
 	}
 	fmt.Printf("model=%s base_url=%s api_key=%s\n", connection.Model, displayBaseURL(connection.BaseURL), redactKey(connection.APIKey))
 	fmt.Printf("memory_dir=%s session_id=%s resumed=%t rounds=%d\n", store.Root(), config.SessionID, config.Resume, len(rounds))
-	return runRounds(ctx, config.MemoryDir, runner, rounds, config.Resume)
+	fmt.Printf("tasks_dir=%s\n", taskStore.Dir())
+	return runRounds(ctx, config.MemoryDir, taskStore, runner, rounds, config.Resume)
 }
 
 // buildRunner 让同一个底层模型通过隔离 Prompt 承担四个互不串线的角色。
-func buildRunner(ctx context.Context, store *claudeautomemory.Store, transcriptStore *claudeautomemory.TranscriptStore, sessionStore *claudeautomemory.SessionStore, config runConfig, chatModel model.BaseChatModel) (*claudeautomemory.Runner, error) {
+func buildRunner(ctx context.Context, store *claudeautomemory.Store, transcriptStore *claudeautomemory.TranscriptStore, sessionStore *claudeautomemory.SessionStore, taskStore *claudetasklist.Store, config runConfig, chatModel model.BaseChatModel) (*claudeautomemory.Runner, error) {
 	extractorModel, err := claudeautomemory.NewLLMExtractor(chatModel)
 	if err != nil {
 		return nil, err
@@ -143,10 +155,13 @@ func buildRunner(ctx context.Context, store *claudeautomemory.Store, transcriptS
 	if err != nil {
 		return nil, err
 	}
-	chatAgent, err := claudeautomemory.NewLLMChatAgent(chatModel)
+	taskAgent, err := claudetasklist.NewAgent(ctx, claudetasklist.AgentConfig{
+		Model: chatModel, Store: taskStore, MaxIterations: 12,
+	})
 	if err != nil {
 		return nil, err
 	}
+	chatAgent := &taskChatAgent{runner: taskAgent}
 	extractor, err := claudeautomemory.NewExtractor(store, extractorModel)
 	if err != nil {
 		return nil, err
@@ -179,8 +194,8 @@ func buildRunner(ctx context.Context, store *claudeautomemory.Store, transcriptS
 }
 
 // runRounds 顺序执行多轮对话，并只输出可面试解释的记忆边界 trace。
-func runRounds(ctx context.Context, memoryDir string, runner *claudeautomemory.Runner, rounds []string, resumed bool) (runOutput, error) {
-	output := runOutput{Mode: "agent", MemoryDir: memoryDir, SessionID: runner.SessionID(), Resumed: resumed, Rounds: len(rounds)}
+func runRounds(ctx context.Context, memoryDir string, taskStore *claudetasklist.Store, runner *claudeautomemory.Runner, rounds []string, resumed bool) (runOutput, error) {
+	output := runOutput{Mode: "agent", MemoryDir: memoryDir, TasksDir: taskStore.Dir(), SessionID: runner.SessionID(), Resumed: resumed, Rounds: len(rounds)}
 	for index, message := range rounds {
 		result, err := runner.RunTurn(ctx, message)
 		if err != nil {
@@ -189,6 +204,12 @@ func runRounds(ctx context.Context, memoryDir string, runner *claudeautomemory.R
 		fmt.Printf("\n=== Round %d ===\nuser: %s\nassistant: %s\n", index+1, message, result.Answer)
 		fmt.Printf("recalled=%s\n", formatRecords(result.Recalled))
 		fmt.Printf("compacted=%t\n", result.Compacted)
+		counts, err := taskStore.Counts(ctx)
+		if err != nil {
+			return runOutput{}, fmt.Errorf("count tasks after round %d: %w", index+1, err)
+		}
+		fmt.Printf("tasks=pending:%d,in_progress:%d,completed:%d\n", counts.Pending, counts.InProgress, counts.Completed)
+		fmt.Printf("task_tool_calls=%d\n", result.ToolCallCount)
 		for _, warning := range result.Warnings {
 			fmt.Printf("memory_warning=%v\n", warning)
 		}
@@ -223,6 +244,10 @@ func runRounds(ctx context.Context, memoryDir string, runner *claudeautomemory.R
 			output.Warnings += len(sessionDrained.Warnings)
 		}
 		output.Recalled += len(result.Recalled)
+		output.PendingTasks = counts.Pending
+		output.InProgressTasks = counts.InProgress
+		output.CompletedTasks = counts.Completed
+		output.TaskToolCalls += result.ToolCallCount
 		if result.Compacted {
 			output.Compactions++
 		}
@@ -236,7 +261,7 @@ func runRounds(ctx context.Context, memoryDir string, runner *claudeautomemory.R
 func parseRunConfig(args []string) (runConfig, error) {
 	fs := flag.NewFlagSet("claude-auto-memory-agent", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	config := runConfig{SessionConfig: claudeautomemory.DefaultSessionMemoryConfig()}
+	config := runConfig{SessionConfig: defaultOneClickSessionConfig()}
 	fs.StringVar(&config.EnvPath, "env-file", defaultEnvPath, "dotenv file containing model config")
 	fs.StringVar(&config.MemoryDir, "memory-dir", defaultMemoryDir, "private/team Markdown memory root")
 	fs.StringVar(&config.RoundsFile, "rounds-file", defaultRoundsPath, "multi-round interview scenario")
@@ -261,6 +286,16 @@ func parseRunConfig(args []string) (runConfig, error) {
 		return runConfig{}, fmt.Errorf("load env: %w", err)
 	}
 	return config, nil
+}
+
+// defaultOneClickSessionConfig 只降低 CLI 面试演示阈值，底层库仍保留 Claude Code 风格生产默认值。
+func defaultOneClickSessionConfig() claudeautomemory.SessionMemoryConfig {
+	config := claudeautomemory.DefaultSessionMemoryConfig()
+	config.MinimumTokensToInit = 1
+	config.MinimumTokensBetweenUpdates = 1
+	config.CompactTokens = 1
+	config.MinimumRecentMessages = 1
+	return config
 }
 
 // shortMessageID 只在 trace 中暴露 UUID 前八位，完整边界仍保存在 state.json。
