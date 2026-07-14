@@ -9,31 +9,32 @@ import (
 // TestPermissionEngineMatchesClaudeCodeModes 验证非 coding 场景仍保留 Claude Code 的权限模式语义。
 func TestPermissionEngineMatchesClaudeCodeModes(t *testing.T) {
 	engine := NewPermissionEngine([]ToolPolicy{
-		{Name: "inspect_tenant", Kind: ToolKindRead},
-		{Name: "apply_feature_flag", Kind: ToolKindEdit},
-		{Name: "send_change_notice", Kind: ToolKindExternal},
-		{Name: "delete_tenant", Kind: ToolKindDestructive},
+		{Name: "inspect_tenant"},
+		{Name: "apply_feature_flag"},
+		{Name: "send_change_notice"},
+		{Name: "delete_tenant"},
 	})
 
 	tests := []struct {
-		name string
-		mode PermissionMode
-		tool string
-		want PermissionBehavior
+		name  string
+		mode  PermissionMode
+		tool  string
+		check ToolPermissionCheckResult
+		want  PermissionBehavior
 	}{
-		{name: "default allows read", mode: PermissionModeDefault, tool: "inspect_tenant", want: PermissionAllow},
-		{name: "default asks before edit", mode: PermissionModeDefault, tool: "apply_feature_flag", want: PermissionAsk},
-		{name: "plan denies edit", mode: PermissionModePlan, tool: "apply_feature_flag", want: PermissionDeny},
-		{name: "acceptEdits allows reversible edit", mode: PermissionModeAcceptEdits, tool: "apply_feature_flag", want: PermissionAllow},
-		{name: "acceptEdits still asks before external effect", mode: PermissionModeAcceptEdits, tool: "send_change_notice", want: PermissionAsk},
-		{name: "dontAsk turns ask into deny", mode: PermissionModeDontAsk, tool: "apply_feature_flag", want: PermissionDeny},
-		{name: "bypass allows ordinary edit", mode: PermissionModeBypassPermissions, tool: "apply_feature_flag", want: PermissionAllow},
-		{name: "destructive safety denial survives bypass", mode: PermissionModeBypassPermissions, tool: "delete_tenant", want: PermissionDeny},
+		{name: "default accepts tool allow", mode: PermissionModeDefault, tool: "inspect_tenant", check: ToolPermissionCheckResult{Behavior: PermissionAllow}, want: PermissionAllow},
+		{name: "default keeps tool ask", mode: PermissionModeDefault, tool: "apply_feature_flag", check: ToolPermissionCheckResult{Behavior: PermissionAsk}, want: PermissionAsk},
+		{name: "plan respects tool deny", mode: PermissionModePlan, tool: "apply_feature_flag", check: ToolPermissionCheckResult{Behavior: PermissionDeny}, want: PermissionDeny},
+		{name: "acceptEdits accepts tool allow", mode: PermissionModeAcceptEdits, tool: "apply_feature_flag", check: ToolPermissionCheckResult{Behavior: PermissionAllow}, want: PermissionAllow},
+		{name: "acceptEdits keeps external safety ask", mode: PermissionModeAcceptEdits, tool: "send_change_notice", check: ToolPermissionCheckResult{Behavior: PermissionAsk, BypassImmune: true}, want: PermissionAsk},
+		{name: "dontAsk turns tool ask into deny", mode: PermissionModeDontAsk, tool: "apply_feature_flag", check: ToolPermissionCheckResult{Behavior: PermissionAsk}, want: PermissionDeny},
+		{name: "bypass allows ordinary tool ask", mode: PermissionModeBypassPermissions, tool: "apply_feature_flag", check: ToolPermissionCheckResult{Behavior: PermissionAsk}, want: PermissionAllow},
+		{name: "tool deny survives bypass", mode: PermissionModeBypassPermissions, tool: "delete_tenant", check: ToolPermissionCheckResult{Behavior: PermissionDeny}, want: PermissionDeny},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			decision := engine.Evaluate(EvaluationInput{Mode: tt.mode, ToolName: tt.tool})
+			decision := engine.Evaluate(EvaluationInput{Mode: tt.mode, ToolName: tt.tool, ToolCheck: tt.check})
 			if decision.Behavior != tt.want {
 				t.Fatalf("behavior = %q, want %q; reason=%q", decision.Behavior, tt.want, decision.Reason)
 			}
@@ -43,7 +44,7 @@ func TestPermissionEngineMatchesClaudeCodeModes(t *testing.T) {
 
 // TestExplicitRulesOverrideHookAllow 验证 PreToolUse Hook 的放行不能绕过显式 deny/ask 规则。
 func TestExplicitRulesOverrideHookAllow(t *testing.T) {
-	engine := NewPermissionEngine([]ToolPolicy{{Name: "apply_feature_flag", Kind: ToolKindEdit}})
+	engine := NewPermissionEngine([]ToolPolicy{{Name: "apply_feature_flag"}})
 
 	deny := engine.Evaluate(EvaluationInput{
 		Mode:          PermissionModeDefault,
@@ -80,10 +81,14 @@ func TestExplicitRulesOverrideHookAllow(t *testing.T) {
 
 // TestPlanModeCannotBeBypassedByAllowRule 验证 plan 模式仍是只读边界，普通 allow 规则不能开启写操作。
 func TestPlanModeCannotBeBypassedByAllowRule(t *testing.T) {
-	engine := NewPermissionEngine([]ToolPolicy{{Name: "apply_feature_flag", Kind: ToolKindEdit}})
+	engine := NewPermissionEngine([]ToolPolicy{{Name: "apply_feature_flag"}})
 	decision := engine.Evaluate(EvaluationInput{
 		Mode:     PermissionModePlan,
 		ToolName: "apply_feature_flag",
+		ToolCheck: ToolPermissionCheckResult{
+			Behavior: PermissionDeny,
+			Reason:   "规划模式下不执行功能开关变更",
+		},
 		Rules: []PermissionRule{{
 			Behavior: PermissionAllow,
 			ToolName: "apply_feature_flag",

@@ -16,11 +16,11 @@ const (
 type PermissionMode string
 
 const (
-	// PermissionModeDefault 表示标准交互模式：只读工具自动允许，写操作和外部副作用默认询问。
+	// PermissionModeDefault 表示标准交互模式：尊重每个工具的 CheckPermissions 结果，需要询问时进入人工审批。
 	PermissionModeDefault PermissionMode = "default"
-	// PermissionModePlan 表示只规划不执行：只读工具允许，编辑、外部副作用和危险操作全部拒绝。
+	// PermissionModePlan 表示规划模式；哪些调用可以执行由各工具结合自身语义判断，不由统一工具分类决定。
 	PermissionModePlan PermissionMode = "plan"
-	// PermissionModeAcceptEdits 表示自动接受可逆内部修改；外部副作用仍需询问，危险操作仍拒绝。
+	// PermissionModeAcceptEdits 表示工具可以自动接受自身认定为可逆编辑的调用，其他风险仍由工具判断。
 	PermissionModeAcceptEdits PermissionMode = "acceptEdits"
 	// PermissionModeDontAsk 表示禁止弹出人工确认；原本需要询问的调用直接拒绝，显式允许规则仍可放行。
 	PermissionModeDontAsk PermissionMode = "dontAsk"
@@ -28,24 +28,10 @@ const (
 	PermissionModeBypassPermissions PermissionMode = "bypassPermissions"
 )
 
-// ToolKind 把非 coding 工具映射到 Claude Code 的读、编辑、外部副作用和危险操作边界。
-type ToolKind string
-
-const (
-	// ToolKindRead 表示只读取信息、不改变业务状态的工具，例如查询租户配置；默认可自动放行。
-	ToolKindRead ToolKind = "read"
-	// ToolKindEdit 表示会修改内部状态但通常可撤销的工具，例如切换功能开关；默认需要确认。
-	ToolKindEdit ToolKind = "edit"
-	// ToolKindExternal 表示会影响系统外部的工具，例如发送短信或调用第三方接口；即使允许普通编辑也仍需确认。
-	ToolKindExternal ToolKind = "external"
-	// ToolKindDestructive 表示删除、清空等高危且难以恢复的工具；当前权限内核在所有模式下都会拒绝。
-	ToolKindDestructive ToolKind = "destructive"
-)
-
-// ToolPolicy 描述一个工具的稳定安全属性，业务参数规则由 PermissionRule 另行承载。
+// ToolPolicy 描述一个工具的权限入口；每个工具必须提供自己的 Checker，不使用统一风险分类。
 type ToolPolicy struct {
-	Name string
-	Kind ToolKind
+	Name    string
+	Checker ToolPermissionChecker
 }
 
 // PermissionRule 表示用户或组织显式配置的工具权限规则。
@@ -63,6 +49,7 @@ type EvaluationInput struct {
 	ArgumentsJSON string
 	HookDecision  PermissionBehavior
 	HookReason    string
+	ToolCheck     ToolPermissionCheckResult
 	Rules         []PermissionRule
 }
 

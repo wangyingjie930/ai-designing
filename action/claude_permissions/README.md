@@ -14,6 +14,12 @@
 | `PostToolUse` | `PostToolUseHook` 审计或改写成功输出 |
 | `Stop` | `StopHook` 检查最终助手回复 |
 
+## 工具自己的权限检查
+
+每个工具必须在 `ToolPolicy.Checker` 注册自己的 `ToolPermissionChecker`，根据真实参数和当前 Mode 返回 `allow`、`ask`、`deny` 或 passthrough。系统不再维护统一风险类型；passthrough 在没有其他放行依据时会按默认安全策略转成 `ask`。
+
+SaaS 示例中的五个工具已经分别实现参数级检查：只读查询和计划生成检查必填参数后放行；功能开关根据租户、开关名称和 Mode 判断；外发通知会拦截疑似敏感内容并强制人工确认；租户删除永久拒绝。`BypassImmune` 用于标记即使在 `bypassPermissions` 下也必须确认的安全检查。
+
 安全硬限制始终优先：`delete_tenant` 即使在 `bypassPermissions` 下也会被拒绝。显式 `deny/ask` 规则也不能被 `PreToolUse allow` 绕过。
 
 ## 运行

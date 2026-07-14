@@ -21,31 +21,34 @@ func NewPermissionEngine(tools []ToolPolicy) *PermissionEngine {
 	return &PermissionEngine{tools: indexed}
 }
 
-// Evaluate 按“安全硬限制 -> 显式规则 -> Hook -> 模式默认值”的顺序裁决工具调用。
+// Evaluate 合并 PreToolUse、显式规则、工具自身检查和权限模式，得到单次调用的最终裁决。
 func (e *PermissionEngine) Evaluate(input EvaluationInput) PermissionDecision {
 	toolName := normalizeToolName(input.ToolName)
-	policy, ok := e.tools[toolName]
+	_, ok := e.tools[toolName]
 	if !ok {
 		return PermissionDecision{Behavior: PermissionDeny, Reason: "tool is not registered", Source: "tool_policy"}
-	}
-	if policy.Kind == ToolKindDestructive {
-		return PermissionDecision{Behavior: PermissionDeny, Reason: "destructive operation is blocked by safety policy", Source: "safety"}
 	}
 	if input.HookDecision == PermissionDeny {
 		return PermissionDecision{Behavior: PermissionDeny, Reason: firstReason(input.HookReason, "denied by PreToolUse hook"), Source: "pre_tool_hook"}
 	}
 
 	matched, hasRule := strongestMatchingRule(input.Rules, toolName, input.ArgumentsJSON)
-	if hasRule && matched.Behavior != PermissionAllow {
+	if hasRule && matched.Behavior == PermissionDeny {
 		return PermissionDecision{Behavior: matched.Behavior, Reason: firstReason(matched.Reason, "matched explicit permission rule"), Source: "rule"}
+	}
+	if input.ToolCheck.Behavior == PermissionDeny {
+		return PermissionDecision{Behavior: PermissionDeny, Reason: firstReason(input.ToolCheck.Reason, "denied by tool permission check"), Source: "tool_permission"}
+	}
+	if hasRule && matched.Behavior == PermissionAsk {
+		return PermissionDecision{Behavior: PermissionAsk, Reason: firstReason(matched.Reason, "matched explicit permission rule"), Source: "rule"}
 	}
 
 	mode := input.Mode
 	if mode == "" {
 		mode = PermissionModeDefault
 	}
-	if mode == PermissionModePlan && policy.Kind != ToolKindRead {
-		return PermissionDecision{Behavior: PermissionDeny, Reason: "plan mode only allows read tools", Source: "mode"}
+	if input.ToolCheck.Behavior == PermissionAsk && input.ToolCheck.BypassImmune {
+		return applyDontAsk(mode, PermissionDecision{Behavior: PermissionAsk, Reason: firstReason(input.ToolCheck.Reason, "tool safety check requires confirmation"), Source: "tool_permission"})
 	}
 	if hasRule {
 		return PermissionDecision{Behavior: matched.Behavior, Reason: firstReason(matched.Reason, "matched explicit permission rule"), Source: "rule"}
@@ -56,9 +59,21 @@ func (e *PermissionEngine) Evaluate(input EvaluationInput) PermissionDecision {
 	if input.HookDecision == PermissionAsk {
 		return applyDontAsk(mode, PermissionDecision{Behavior: PermissionAsk, Reason: firstReason(input.HookReason, "confirmation requested by PreToolUse hook"), Source: "pre_tool_hook"})
 	}
+	if mode == PermissionModeBypassPermissions {
+		return PermissionDecision{Behavior: PermissionAllow, Reason: "allowed by bypassPermissions mode", Source: "mode"}
+	}
+	if input.ToolCheck.Behavior == PermissionAllow {
+		return PermissionDecision{Behavior: PermissionAllow, Reason: firstReason(input.ToolCheck.Reason, "allowed by tool permission check"), Source: "tool_permission"}
+	}
+	if input.ToolCheck.Behavior == PermissionAsk {
+		return applyDontAsk(mode, PermissionDecision{Behavior: PermissionAsk, Reason: firstReason(input.ToolCheck.Reason, "tool requires confirmation"), Source: "tool_permission"})
+	}
 
-	decision := defaultDecision(mode, policy.Kind)
-	return applyDontAsk(mode, decision)
+	return applyDontAsk(mode, PermissionDecision{
+		Behavior: PermissionAsk,
+		Reason:   "tool permission check returned passthrough",
+		Source:   "tool_permission",
+	})
 }
 
 // BlanketDeniedTools 返回整工具 deny 规则，用于在模型调用前收缩可见工具集合。
@@ -71,20 +86,6 @@ func (e *PermissionEngine) BlanketDeniedTools(rules []PermissionRule) map[string
 		}
 	}
 	return denied
-}
-
-// defaultDecision 把权限模式和非 coding 工具类型映射成默认裁决。
-func defaultDecision(mode PermissionMode, kind ToolKind) PermissionDecision {
-	if mode == PermissionModeBypassPermissions {
-		return PermissionDecision{Behavior: PermissionAllow, Reason: "allowed by bypassPermissions mode", Source: "mode"}
-	}
-	if kind == ToolKindRead {
-		return PermissionDecision{Behavior: PermissionAllow, Reason: "read tool is auto allowed", Source: "tool_policy"}
-	}
-	if mode == PermissionModeAcceptEdits && kind == ToolKindEdit {
-		return PermissionDecision{Behavior: PermissionAllow, Reason: "reversible change is allowed by acceptEdits mode", Source: "mode"}
-	}
-	return PermissionDecision{Behavior: PermissionAsk, Reason: "tool requires confirmation", Source: "tool_policy"}
 }
 
 // applyDontAsk 保证无交互模式不会遗留无法消费的 PermissionRequest。

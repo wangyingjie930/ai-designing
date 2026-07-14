@@ -187,11 +187,11 @@ func readApprovalFromScanner(scanner *bufio.Scanner, output io.Writer, request c
 	}
 }
 
-// printPolicySummary 输出工具分类和整工具 deny 规则，便于不调用模型时检查配置。
+// printPolicySummary 输出每个工具的权限检查入口和整工具 deny 规则，便于不调用模型时检查配置。
 func printPolicySummary(output io.Writer, mode claudepermissions.PermissionMode, policies []claudepermissions.ToolPolicy) {
 	fmt.Fprintf(output, "mode=%s\n", mode)
 	for _, policy := range policies {
-		fmt.Fprintf(output, "%s=%s\n", policy.Name, policy.Kind)
+		fmt.Fprintf(output, "%s=checkPermissions\n", policy.Name)
 	}
 	fmt.Fprintln(output, "blanket_deny=delete_tenant")
 }

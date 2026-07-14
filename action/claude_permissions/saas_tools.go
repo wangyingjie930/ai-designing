@@ -7,14 +7,14 @@ import (
 	toolutils "github.com/cloudwego/eino/components/tool/utils"
 )
 
-// DefaultSaaSToolPolicies 返回生产变更场景的工具安全分类。
+// DefaultSaaSToolPolicies 返回生产变更场景的工具权限入口，每个工具都有自己的 CheckPermissions。
 func DefaultSaaSToolPolicies() []ToolPolicy {
 	return []ToolPolicy{
-		{Name: InspectTenantToolName, Kind: ToolKindRead},
-		{Name: DraftChangePlanToolName, Kind: ToolKindRead},
-		{Name: ApplyFeatureFlagToolName, Kind: ToolKindEdit},
-		{Name: SendChangeNoticeToolName, Kind: ToolKindExternal},
-		{Name: DeleteTenantToolName, Kind: ToolKindDestructive},
+		{Name: InspectTenantToolName, Checker: ToolPermissionCheckerFunc(checkInspectTenantPermission)},
+		{Name: DraftChangePlanToolName, Checker: ToolPermissionCheckerFunc(checkDraftChangePlanPermission)},
+		{Name: ApplyFeatureFlagToolName, Checker: ToolPermissionCheckerFunc(checkApplyFeatureFlagPermission)},
+		{Name: SendChangeNoticeToolName, Checker: ToolPermissionCheckerFunc(checkSendChangeNoticePermission)},
+		{Name: DeleteTenantToolName, Checker: ToolPermissionCheckerFunc(checkDeleteTenantPermission)},
 	}
 }
 

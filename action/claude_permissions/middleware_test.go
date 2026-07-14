@@ -17,8 +17,8 @@ import (
 func TestMiddlewareFiltersBlanketDeniedTools(t *testing.T) {
 	middleware, err := NewMiddleware(MiddlewareConfig{
 		Tools: []ToolPolicy{
-			{Name: "inspect_tenant", Kind: ToolKindRead},
-			{Name: "delete_tenant", Kind: ToolKindDestructive},
+			{Name: "inspect_tenant", Checker: fixedToolChecker(PermissionAllow)},
+			{Name: "delete_tenant", Checker: fixedToolChecker(PermissionDeny)},
 		},
 		Rules: []PermissionRule{{Behavior: PermissionDeny, ToolName: "delete_tenant"}},
 	})
@@ -39,7 +39,7 @@ func TestMiddlewareFiltersBlanketDeniedTools(t *testing.T) {
 func TestMiddlewarePausesUpdatesExecutesAndPostProcesses(t *testing.T) {
 	broker := NewPermissionBroker(1)
 	middleware, err := NewMiddleware(MiddlewareConfig{
-		Tools:  []ToolPolicy{{Name: "apply_feature_flag", Kind: ToolKindEdit}},
+		Tools:  []ToolPolicy{{Name: "apply_feature_flag", Checker: fixedToolChecker(PermissionAsk)}},
 		Mode:   PermissionModeDefault,
 		Broker: broker,
 		PreToolUseHooks: []PreToolUseHook{PreToolUseHookFunc(func(ctx context.Context, input PreToolUseInput) (PreToolUseResult, error) {
@@ -86,7 +86,7 @@ func TestMiddlewarePausesUpdatesExecutesAndPostProcesses(t *testing.T) {
 // TestMiddlewareReturnsStructuredDenialWithoutExecuting 验证拒绝作为工具结果返回，让模型有机会调整计划。
 func TestMiddlewareReturnsStructuredDenialWithoutExecuting(t *testing.T) {
 	middleware, err := NewMiddleware(MiddlewareConfig{
-		Tools: []ToolPolicy{{Name: "apply_feature_flag", Kind: ToolKindEdit}},
+		Tools: []ToolPolicy{{Name: "apply_feature_flag", Checker: fixedToolChecker(PermissionDeny)}},
 		Mode:  PermissionModePlan,
 	})
 	if err != nil {
@@ -120,7 +120,7 @@ func TestMiddlewareReturnsStructuredDenialWithoutExecuting(t *testing.T) {
 func TestMiddlewareRunsStopHookOnFinalAssistantMessage(t *testing.T) {
 	seen := make(chan string, 1)
 	middleware, err := NewMiddleware(MiddlewareConfig{
-		Tools: []ToolPolicy{{Name: "inspect_tenant", Kind: ToolKindRead}},
+		Tools: []ToolPolicy{{Name: "inspect_tenant", Checker: fixedToolChecker(PermissionAllow)}},
 		StopHooks: []StopHook{StopHookFunc(func(ctx context.Context, message string) error {
 			seen <- message
 			if strings.Contains(message, "secret") {
@@ -145,4 +145,11 @@ func TestMiddlewareRunsStopHookOnFinalAssistantMessage(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("stop hook was not called")
 	}
+}
+
+// fixedToolChecker 为中间件既有测试提供固定的工具级权限结果。
+func fixedToolChecker(behavior PermissionBehavior) ToolPermissionChecker {
+	return ToolPermissionCheckerFunc(func(context.Context, ToolPermissionCheckInput) (ToolPermissionCheckResult, error) {
+		return ToolPermissionCheckResult{Behavior: behavior}, nil
+	})
 }

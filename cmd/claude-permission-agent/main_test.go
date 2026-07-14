@@ -9,7 +9,7 @@ import (
 	claudepermissions "ai-designing/action/claude_permissions"
 )
 
-// TestPrepareOnlyPrintsClaudePermissionPipeline 验证无需模型配置也能检查权限模式和工具分类。
+// TestPrepareOnlyPrintsClaudePermissionPipeline 验证无需模型配置也能检查权限模式和工具权限入口。
 func TestPrepareOnlyPrintsClaudePermissionPipeline(t *testing.T) {
 	var output bytes.Buffer
 	result, err := runAgent(context.Background(), []string{"-prepare-only", "-mode", "plan"}, strings.NewReader(""), &output)
@@ -19,7 +19,7 @@ func TestPrepareOnlyPrintsClaudePermissionPipeline(t *testing.T) {
 	if result.Mode != claudepermissions.PermissionModePlan || result.ToolCount != 5 {
 		t.Fatalf("result = %+v", result)
 	}
-	if !strings.Contains(output.String(), "delete_tenant=destructive") {
+	if !strings.Contains(output.String(), "delete_tenant=checkPermissions") {
 		t.Fatalf("output = %s", output.String())
 	}
 }

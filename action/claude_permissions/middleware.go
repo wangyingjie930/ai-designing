@@ -51,6 +51,14 @@ func NewMiddleware(config MiddlewareConfig) (*Middleware, error) {
 	if len(config.Tools) == 0 {
 		return nil, fmt.Errorf("at least one tool policy is required")
 	}
+	for _, policy := range config.Tools {
+		if strings.TrimSpace(policy.Name) == "" {
+			return nil, fmt.Errorf("tool policy name is required")
+		}
+		if policy.Checker == nil {
+			return nil, fmt.Errorf("tool %s must implement CheckPermissions", policy.Name)
+		}
+	}
 	mode := config.Mode
 	if mode == "" {
 		mode = PermissionModeDefault
@@ -227,6 +235,17 @@ func (m *Middleware) authorize(ctx context.Context, toolName string, argumentsJS
 			hookReason = result.Reason
 		}
 	}
+	toolCheck, err := m.engine.CheckToolPermissions(ctx, ToolPermissionCheckInput{
+		ToolName:      toolName,
+		ArgumentsJSON: currentArguments,
+		Mode:          m.mode,
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	if toolCheck.UpdatedArgumentsJSON != "" {
+		currentArguments = toolCheck.UpdatedArgumentsJSON
+	}
 
 	decision := m.engine.Evaluate(EvaluationInput{
 		Mode:          m.mode,
@@ -234,6 +253,7 @@ func (m *Middleware) authorize(ctx context.Context, toolName string, argumentsJS
 		ArgumentsJSON: currentArguments,
 		HookDecision:  hookDecision,
 		HookReason:    hookReason,
+		ToolCheck:     toolCheck,
 		Rules:         m.rules,
 	})
 	if decision.Behavior == PermissionDeny {
