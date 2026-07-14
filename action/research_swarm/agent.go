@@ -74,20 +74,22 @@ func roleInstruction(role AgentRole, teamName string) string {
 		"你是调查报告 swarm 中的一个外部进程 teammate。",
 		"普通 assistant 文本不会被其他 teammate 看到；需要跨 agent 通信时必须调用 send_message。",
 		"所有证据必须通过 source card 或 report section 落到 SQLite 后再被后续角色引用。",
+		"完成当前任务时必须先调用 update_task，再调用 send_message(to=report_director) 显式汇报结果；runtime 只会上报 idle，不会替你转发业务结果。",
 		"当前 team_name 是 " + teamName + "。",
 	}
 	switch role {
 	case RoleSearcher:
 		return strings.Join(append(common,
 			"你的职责是调用 web_search，挑选有价值的结果并调用 save_source_card。",
-			"保存资料卡后更新当前 task 状态；不要默认通知 analyst。"), "\n")
+			"保存资料卡后更新当前 task 状态，并把资料卡摘要显式汇报给 report_director；不要直接通知 analyst。"), "\n")
 	case RoleAnalyst:
 		return strings.Join(append(common,
 			"你的职责是读取 source cards，归纳事实、冲突点、证据强弱，并保存分析章节。",
-			"分析完成后更新当前 task 状态；不要默认通知 writer。"), "\n")
+			"分析完成后更新当前 task 状态，并把章节摘要显式汇报给 report_director；不要直接通知 writer。"), "\n")
 	case RoleWriter:
 		return strings.Join(append(common,
-			"你的职责是读取 source cards 和分析章节，输出带 source id 引用的最终调查报告章节。"), "\n")
+			"你的职责是读取 source cards 和分析章节，输出带 source id 引用的最终调查报告章节。",
+			"最终报告落库并更新 task 后，必须显式通知 report_director。"), "\n")
 	default:
 		return strings.Join(common, "\n")
 	}
@@ -97,12 +99,18 @@ func roleInstruction(role AgentRole, teamName string) string {
 type deterministicRoleModel struct {
 	role  AgentRole
 	calls int
+	task  int64
 }
 
 // Generate 通过固定工具调用序列模拟各角色的模型决策。
 func (m *deterministicRoleModel) Generate(_ context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-	m.calls++
 	payload := extractTaskPayload(input)
+	// 离线模型按 task 重置工具序列，保证同一个常驻 worker 能继续处理后续任务。
+	if payload.TaskID > 0 && payload.TaskID != m.task {
+		m.task = payload.TaskID
+		m.calls = 0
+	}
+	m.calls++
 	investigation := firstNonEmpty(payload.Prompt, payload.Topic, "调查报告主题")
 	switch m.role {
 	case RoleSearcher:
@@ -151,8 +159,14 @@ func (m *deterministicRoleModel) searcherMessage(taskID int64, investigation str
 		if taskID > 0 {
 			return toolCallMessage("call_update_task", UpdateTaskToolName, fmt.Sprintf(`{"task_id":%d,"status":"completed","result":"saved source cards"}`, taskID)), nil
 		}
+	case 5:
+		return toolCallMessage("call_report_result", SendMessageToolName, toolArgs(map[string]any{
+			"to":      defaultLeaderName,
+			"summary": "已保存两张资料卡",
+			"message": "source_cards 已就绪，资料卡 ID 为 1、2。",
+		})), nil
 	}
-	return schema.AssistantMessage("搜索员已保存资料卡并通知分析员。", nil), nil
+	return schema.AssistantMessage("搜索员已保存资料卡并向 report_director 汇报。", nil), nil
 }
 
 func (m *deterministicRoleModel) analystMessage(taskID int64, investigation string) (*schema.Message, error) {
@@ -169,8 +183,14 @@ func (m *deterministicRoleModel) analystMessage(taskID int64, investigation stri
 		if taskID > 0 {
 			return toolCallMessage("call_update_task", UpdateTaskToolName, fmt.Sprintf(`{"task_id":%d,"status":"completed","result":"saved analysis section"}`, taskID)), nil
 		}
+	case 4:
+		return toolCallMessage("call_report_result", SendMessageToolName, toolArgs(map[string]any{
+			"to":      defaultLeaderName,
+			"summary": "事实分析章节已完成",
+			"message": "事实分析章节已落库，可由 writer 基于 source_cards 和该章节继续撰写。",
+		})), nil
 	}
-	return schema.AssistantMessage("分析员已保存事实分析并通知撰稿员。", nil), nil
+	return schema.AssistantMessage("分析员已保存事实分析并向 report_director 汇报。", nil), nil
 }
 
 func (m *deterministicRoleModel) writerMessage(taskID int64, investigation string) (*schema.Message, error) {
@@ -189,8 +209,14 @@ func (m *deterministicRoleModel) writerMessage(taskID int64, investigation strin
 		if taskID > 0 {
 			return toolCallMessage("call_update_task", UpdateTaskToolName, fmt.Sprintf(`{"task_id":%d,"status":"completed","result":"saved final report"}`, taskID)), nil
 		}
+	case 5:
+		return toolCallMessage("call_report_result", SendMessageToolName, toolArgs(map[string]any{
+			"to":      defaultLeaderName,
+			"summary": "最终调查报告已完成",
+			"message": "最终报告章节已落库，并保留 source card ID 1、2 的证据引用。",
+		})), nil
 	}
-	return schema.AssistantMessage("撰稿员已保存最终调查报告。", nil), nil
+	return schema.AssistantMessage("撰稿员已保存最终调查报告并向 report_director 汇报。", nil), nil
 }
 
 func toolArgs(v any) string {

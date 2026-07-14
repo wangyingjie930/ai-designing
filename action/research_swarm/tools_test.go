@@ -59,7 +59,7 @@ func TestSendMessageToolSchemaHasDescriptions(t *testing.T) {
 		t.Fatal("send_message tool not found")
 	}
 	schemaText := toolSchemaText(t, send)
-	for _, want := range []string{`"required":["to_agent","kind","content"]`, "跨 agent 消息接收者", "消息正文"} {
+	for _, want := range []string{`"required":["to","message"]`, "接收消息的 teammate 名称", "业务消息正文"} {
 		if !strings.Contains(schemaText, want) {
 			t.Fatalf("schema missing %q\n%s", want, schemaText)
 		}
@@ -80,8 +80,8 @@ func TestLeaderToolsDoNotExposeArtifactPolling(t *testing.T) {
 	requireNoError(t, err)
 
 	names := baseToolNames(t, tools)
-	if !sameStringSet(names, []string{SpawnTeammateToolName}) {
-		t.Fatalf("leader tools = %v, want only spawn_teammate", names)
+	if !sameStringSet(names, []string{SpawnTeammateToolName, SendMessageToolName}) {
+		t.Fatalf("leader tools = %v, want spawn_teammate and send_message", names)
 	}
 }
 

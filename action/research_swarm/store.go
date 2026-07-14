@@ -269,6 +269,30 @@ func (s *Store) UpdateTask(ctx context.Context, taskID int64, status TaskStatus,
 	return err
 }
 
+// GetTask 精确读取一条任务，供 worker idle 和 leader 完成门槛复核真实状态。
+func (s *Store) GetTask(ctx context.Context, taskID int64) (ResearchTask, error) {
+	var task ResearchTask
+	var status, created, updated string
+	err := s.db.QueryRowContext(ctx, `SELECT id, team_name, assignee, title, status, result_json, created_at, updated_at
+		FROM swarm_tasks WHERE id = ?`, taskID).Scan(
+		&task.ID,
+		&task.TeamName,
+		&task.Assignee,
+		&task.Title,
+		&status,
+		&task.ResultJSON,
+		&created,
+		&updated,
+	)
+	if err != nil {
+		return ResearchTask{}, err
+	}
+	task.Status = TaskStatus(status)
+	task.CreatedAt = parseTime(created)
+	task.UpdatedAt = parseTime(updated)
+	return task, nil
+}
+
 // ListTasks 返回 team 下的任务列表。
 func (s *Store) ListTasks(ctx context.Context, teamName string) ([]ResearchTask, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, team_name, assignee, title, status, result_json, created_at, updated_at

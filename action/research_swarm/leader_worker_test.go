@@ -76,7 +76,7 @@ func TestRunLeaderSpawnsThroughDirectorToolCalls(t *testing.T) {
 	}
 }
 
-// TestRunLeaderFeedsCompletionEventsToDirector 验证 leader 把 worker completion 事件作为下一轮输入交给 director。
+// TestRunLeaderFeedsCompletionEventsToDirector 验证 leader 把 worker 显式结果消息作为下一轮输入交给 director。
 func TestRunLeaderFeedsCompletionEventsToDirector(t *testing.T) {
 	store := openTestStore(t)
 	spawner := &fakeSpawner{}
@@ -197,6 +197,13 @@ func TestSpawnTeammateUsesPromptAndDescription(t *testing.T) {
 // TestWorkerUsesTaskPromptAsSearchQuery 验证默认 fake model 消费运行时 task prompt，不把调查主题写死在模型里。
 func TestWorkerUsesTaskPromptAsSearchQuery(t *testing.T) {
 	store := openTestStore(t)
+	requireNoError(t, store.UpsertMember(context.Background(), Member{
+		TeamName: "team-topic",
+		AgentID:  "report_director@team-topic",
+		Name:     "report_director",
+		Role:     RoleReportDirector,
+		Status:   WorkerStatusRunning,
+	}))
 	payload, err := json.Marshal(TaskPayload{
 		Topic:  "客服工单风险控制",
 		Prompt: "调查知识库检索在售后工单中的误召回风险",
@@ -229,9 +236,16 @@ func TestWorkerUsesTaskPromptAsSearchQuery(t *testing.T) {
 	}
 }
 
-// TestWorkerReportsCompletionToLeaderOnly 验证默认 worker 通过 leader mailbox 回报完成，不硬编码通知下游 teammate。
+// TestWorkerReportsCompletionToLeaderOnly 验证 worker 显式汇报结果，并由 runtime 单独上报 idle。
 func TestWorkerReportsCompletionToLeaderOnly(t *testing.T) {
 	store := openTestStore(t)
+	requireNoError(t, store.UpsertMember(context.Background(), Member{
+		TeamName: "team-topic",
+		AgentID:  "report_director@team-topic",
+		Name:     "report_director",
+		Role:     RoleReportDirector,
+		Status:   WorkerStatusRunning,
+	}))
 	task, err := store.CreateTask(context.Background(), ResearchTask{
 		TeamName: "team-topic",
 		Assignee: "searcher@team-topic",
@@ -267,11 +281,14 @@ func TestWorkerReportsCompletionToLeaderOnly(t *testing.T) {
 	requireNoError(t, err)
 	leaderMessages, err := store.ConsumeMessages(context.Background(), "team-topic", "report_director@team-topic", 10)
 	requireNoError(t, err)
-	if len(leaderMessages) != 1 || leaderMessages[0].Kind != MessageKindTaskCompleted {
-		t.Fatalf("leader messages = %#v, want one task_completed event", leaderMessages)
+	if len(leaderMessages) != 2 || leaderMessages[0].Kind != MessageKindNotification || leaderMessages[1].Kind != MessageKindNotification {
+		t.Fatalf("leader messages = %#v, want explicit result plus idle notification", leaderMessages)
 	}
-	if !strings.Contains(leaderMessages[0].ContentJSON, `"type":"artifact_ready"`) || !strings.Contains(leaderMessages[0].ContentJSON, `"artifact":"source_cards"`) {
-		t.Fatalf("completion payload = %s", leaderMessages[0].ContentJSON)
+	if !strings.Contains(leaderMessages[0].ContentJSON, `"from":"searcher"`) || !strings.Contains(leaderMessages[0].ContentJSON, `"message":"source_cards`) {
+		t.Fatalf("explicit result payload = %s", leaderMessages[0].ContentJSON)
+	}
+	if !strings.Contains(leaderMessages[1].ContentJSON, `"type":"idle_notification"`) || !strings.Contains(leaderMessages[1].ContentJSON, `"completed_status":"resolved"`) {
+		t.Fatalf("idle payload = %s", leaderMessages[1].ContentJSON)
 	}
 	analystMessages, err := store.ConsumeMessages(context.Background(), "team-topic", "analyst@team-topic", 10)
 	requireNoError(t, err)
@@ -418,7 +435,7 @@ func (m *eventDrivenDirectorModel) Generate(_ context.Context, input []*schema.M
 			"description": string(RoleSearcher),
 			"prompt":      "AI Agent 外部搜索风险",
 		})), nil
-	case !m.spawnedAnalyst && strings.Contains(text, `"agent_name":"searcher"`):
+	case !m.spawnedAnalyst && strings.Contains(text, `"from":"searcher"`):
 		m.sawSearcherCompletion = true
 		m.spawnedAnalyst = true
 		return toolCallMessage("call_spawn_analyst", SpawnTeammateToolName, toolArgs(map[string]any{
@@ -427,7 +444,7 @@ func (m *eventDrivenDirectorModel) Generate(_ context.Context, input []*schema.M
 			"description": string(RoleAnalyst),
 			"prompt":      "AI Agent 外部搜索风险",
 		})), nil
-	case !m.spawnedWriter && strings.Contains(text, `"agent_name":"analyst"`):
+	case !m.spawnedWriter && strings.Contains(text, `"from":"analyst"`):
 		m.sawAnalystCompletion = true
 		m.spawnedWriter = true
 		return toolCallMessage("call_spawn_writer", SpawnTeammateToolName, toolArgs(map[string]any{
@@ -436,11 +453,11 @@ func (m *eventDrivenDirectorModel) Generate(_ context.Context, input []*schema.M
 			"description": string(RoleWriter),
 			"prompt":      "AI Agent 外部搜索风险",
 		})), nil
-	case strings.Contains(text, `"agent_name":"writer"`):
+	case strings.Contains(text, `"from":"writer"`):
 		m.sawWriterCompletion = true
 		return schema.AssistantMessage("调查报告已完成。", nil), nil
 	default:
-		return schema.AssistantMessage("等待 teammate completion 事件。", nil), nil
+		return schema.AssistantMessage("等待 teammate 显式结果消息。", nil), nil
 	}
 }
 

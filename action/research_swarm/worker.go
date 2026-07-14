@@ -121,39 +121,39 @@ func runWorkerMessage(ctx context.Context, config WorkerConfig, runner *adk.Runn
 			if payload.TaskID > 0 {
 				_ = config.Store.UpdateTask(ctx, payload.TaskID, TaskStatusFailed, fmt.Sprintf(`{"error":%q}`, event.Err.Error()))
 			}
+			_ = config.Store.UpsertMember(ctx, Member{TeamName: config.TeamName, AgentID: agentID, Name: config.AgentName, Role: config.Role, Status: WorkerStatusFailed})
+			_ = notifyLeaderIdle(ctx, config, agentID, payload.TaskID, "failed", "当前任务执行失败")
 			return fmt.Errorf("run adk agent: %w", event.Err)
-		}
-	}
-	if payload.TaskID > 0 {
-		result, _ := json.Marshal(map[string]string{"result": "worker completed"})
-		if err := config.Store.UpdateTask(ctx, payload.TaskID, TaskStatusCompleted, string(result)); err != nil {
-			return fmt.Errorf("mark task completed: %w", err)
-		}
-		if err := notifyLeaderTaskCompleted(ctx, config, agentID, payload.TaskID); err != nil {
-			return fmt.Errorf("notify leader task completed: %w", err)
 		}
 	}
 	if err := config.Store.UpsertMember(ctx, Member{TeamName: config.TeamName, AgentID: agentID, Name: config.AgentName, Role: config.Role, Status: WorkerStatusIdle}); err != nil {
 		return fmt.Errorf("mark worker idle: %w", err)
 	}
+	if err := notifyLeaderIdle(ctx, config, agentID, payload.TaskID, "available", "当前轮次已结束，等待下一步"); err != nil {
+		return fmt.Errorf("notify leader idle: %w", err)
+	}
 	return nil
 }
 
-// notifyLeaderTaskCompleted 模拟 Claude Code 的 teammate 完成通知：产物落库后只回报 leader。
-func notifyLeaderTaskCompleted(ctx context.Context, config WorkerConfig, agentID string, taskID int64) error {
-	artifact, section := completedArtifactForRole(config.Role)
-	event := TaskCompletionEvent{
-		Type:      "artifact_ready",
-		TaskID:    taskID,
-		AgentID:   agentID,
-		AgentName: config.AgentName,
-		Role:      config.Role,
-		Status:    TaskStatusCompleted,
-		Artifact:  artifact,
-		Section:   section,
-		Summary:   completionSummary(config.Role),
+// notifyLeaderIdle 只上报 worker 生命周期状态，业务结果必须由模型显式调用 send_message 汇报。
+func notifyLeaderIdle(ctx context.Context, config WorkerConfig, agentID string, taskID int64, idleReason string, summary string) error {
+	completedStatus := ""
+	if taskID > 0 {
+		task, err := config.Store.GetTask(ctx, taskID)
+		if err != nil {
+			return fmt.Errorf("get task for idle notification: %w", err)
+		}
+		completedStatus = completedStatusForTask(task.Status)
 	}
-	raw, err := json.Marshal(event)
+	notification := IdleNotification{
+		Type:            "idle_notification",
+		AgentName:       config.AgentName,
+		IdleReason:      idleReason,
+		CompletedTaskID: taskID,
+		CompletedStatus: completedStatus,
+		Summary:         summary,
+	}
+	raw, err := json.Marshal(notification)
 	if err != nil {
 		return err
 	}
@@ -161,34 +161,20 @@ func notifyLeaderTaskCompleted(ctx context.Context, config WorkerConfig, agentID
 		TeamName:    config.TeamName,
 		FromAgent:   agentID,
 		ToAgent:     AgentID(defaultLeaderName, config.TeamName),
-		Kind:        MessageKindTaskCompleted,
+		Kind:        MessageKindNotification,
 		ContentJSON: string(raw),
 	})
 	return err
 }
 
-func completedArtifactForRole(role AgentRole) (string, string) {
-	switch role {
-	case RoleSearcher:
-		return "source_cards", ""
-	case RoleAnalyst:
-		return "report_section", "事实分析"
-	case RoleWriter:
-		return "final_report", "最终报告"
+// completedStatusForTask 把共享任务状态映射成 Claude Code idle notification 的完成摘要。
+func completedStatusForTask(status TaskStatus) string {
+	switch status {
+	case TaskStatusCompleted:
+		return "resolved"
+	case TaskStatusFailed:
+		return "failed"
 	default:
-		return "task_result", ""
-	}
-}
-
-func completionSummary(role AgentRole) string {
-	switch role {
-	case RoleSearcher:
-		return "saved source cards"
-	case RoleAnalyst:
-		return "saved analysis section"
-	case RoleWriter:
-		return "saved final report"
-	default:
-		return "worker completed"
+		return ""
 	}
 }

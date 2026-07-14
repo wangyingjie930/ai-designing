@@ -105,3 +105,16 @@ PermissionRule{
 ```
 
 缺少的能力包括：JSON 配置加载、`Tool(pattern)` 解析、`*`/`**` 匹配和工具专属参数匹配。现有 `ArgumentContains` 只是对原始参数 JSON 做子串判断，不能视为完整兼容。
+
+## 文件权限
+
+File Read：
+目录内默认 allow；目录外显式 allow，否则 ask。
+
+File Edit/Write：
+目录内也不默认 allow；
+acceptEdits + 安全路径，或者显式 allow，才允许；
+否则 ask。
+
+Bash/PowerShell：
+额外还可以参考 Sandbox write allowlist。

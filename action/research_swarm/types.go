@@ -35,10 +35,9 @@ const (
 type MessageKind string
 
 const (
-	MessageKindTask          MessageKind = "task"
-	MessageKindNotification  MessageKind = "notification"
-	MessageKindTaskCompleted MessageKind = "task_completed"
-	MessageKindShutdown      MessageKind = "shutdown"
+	MessageKindTask         MessageKind = "task"
+	MessageKindNotification MessageKind = "notification"
+	MessageKindShutdown     MessageKind = "shutdown"
 )
 
 // TaskStatus 描述调查任务在共享 SQLite 中的执行状态。
@@ -127,25 +126,30 @@ type TaskPayload struct {
 	Prompt string `json:"prompt"`
 }
 
-// TaskCompletionEvent 是 worker 回给 leader 的完成事件，leader 会把它作为下一轮 director 输入。
-type TaskCompletionEvent struct {
-	Type      string     `json:"type"`
-	TaskID    int64      `json:"task_id"`
-	AgentID   string     `json:"agent_id"`
-	AgentName string     `json:"agent_name"`
-	Role      AgentRole  `json:"role"`
-	Status    TaskStatus `json:"status"`
-	Artifact  string     `json:"artifact,omitempty"`
-	Section   string     `json:"section,omitempty"`
-	Summary   string     `json:"summary,omitempty"`
+// TeammateMessage 是 teammate 通过 send_message 显式投递的业务消息。
+type TeammateMessage struct {
+	From    string `json:"from"`
+	Summary string `json:"summary,omitempty"`
+	Message string `json:"message"`
+}
+
+// IdleNotification 只描述 teammate 当前轮次结束后的可用状态，不承载业务结果。
+type IdleNotification struct {
+	Type            string `json:"type"`
+	AgentName       string `json:"agent_name"`
+	IdleReason      string `json:"idle_reason"`
+	CompletedTaskID int64  `json:"completed_task_id,omitempty"`
+	CompletedStatus string `json:"completed_status,omitempty"`
+	Summary         string `json:"summary,omitempty"`
 }
 
 // LeaderDirectorInput 是 leader 喂给 report_director 的每一轮输入。
 type LeaderDirectorInput struct {
-	Type     string               `json:"type"`
-	TeamName string               `json:"team_name"`
-	Topic    string               `json:"topic"`
-	Event    *TaskCompletionEvent `json:"event,omitempty"`
+	Type     string            `json:"type"`
+	TeamName string            `json:"team_name"`
+	Topic    string            `json:"topic"`
+	Message  *TeammateMessage  `json:"message,omitempty"`
+	Idle     *IdleNotification `json:"idle,omitempty"`
 }
 
 // LeaderResult 是 leader 命令最终返回给 CLI 和测试的紧凑摘要。
@@ -163,4 +167,14 @@ type LeaderResult struct {
 // AgentID 使用 Claude Code teammate 风格的稳定身份格式：<agent_name>@<team_name>。
 func AgentID(agentName string, teamName string) string {
 	return agentName + "@" + teamName
+}
+
+// AgentNameFromID 从内部稳定 ID 中提取模型可见的 teammate 名称。
+func AgentNameFromID(agentID string) string {
+	for i := len(agentID) - 1; i >= 0; i-- {
+		if agentID[i] == '@' {
+			return agentID[:i]
+		}
+	}
+	return agentID
 }

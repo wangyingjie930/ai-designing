@@ -30,15 +30,15 @@ type ToolConfig struct {
 }
 
 type sendMessageRequest struct {
-	ToAgent string `json:"to_agent" jsonschema:"required" jsonschema_description:"跨 agent 消息接收者，必须是 name@team 格式"`
-	Kind    string `json:"kind" jsonschema:"required,enum=notification,enum=task,enum=shutdown" jsonschema_description:"消息类型，普通协作消息使用 notification"`
-	Content string `json:"content" jsonschema:"required" jsonschema_description:"消息正文；需要结构化内容时传 JSON 字符串"`
+	To      string `json:"to" jsonschema:"required" jsonschema_description:"接收消息的 teammate 名称，例如 report_director 或 analyst"`
+	Summary string `json:"summary,omitempty" jsonschema_description:"5-10 个词的消息摘要，便于接收者快速判断内容"`
+	Message string `json:"message" jsonschema:"required" jsonschema_description:"要显式发送给 teammate 的业务消息正文"`
 }
 
 type sendMessageResponse struct {
 	MessageID int64  `json:"message_id"`
-	ToAgent   string `json:"to_agent"`
-	Kind      string `json:"kind"`
+	To        string `json:"to"`
+	Summary   string `json:"summary,omitempty"`
 }
 
 type updateTaskRequest struct {
@@ -128,31 +128,7 @@ func NewRoleTools(ctx context.Context, config ToolConfig) ([]tool.BaseTool, erro
 }
 
 func commonTools(config ToolConfig) ([]tool.BaseTool, error) {
-	send, err := toolutils.InferTool[sendMessageRequest, *sendMessageResponse](
-		SendMessageToolName,
-		"Send a mailbox message to another teammate. Normal assistant text is not visible to peers.",
-		func(ctx context.Context, req sendMessageRequest) (*sendMessageResponse, error) {
-			kind := MessageKind(strings.TrimSpace(req.Kind))
-			if kind == "" {
-				kind = MessageKindNotification
-			}
-			payload, err := json.Marshal(map[string]string{"content": req.Content})
-			if err != nil {
-				return nil, err
-			}
-			msg, err := config.Store.EnqueueMessage(ctx, MailboxMessage{
-				TeamName:    config.TeamName,
-				FromAgent:   config.AgentID,
-				ToAgent:     req.ToAgent,
-				Kind:        kind,
-				ContentJSON: string(payload),
-			})
-			if err != nil {
-				return nil, err
-			}
-			return &sendMessageResponse{MessageID: msg.ID, ToAgent: req.ToAgent, Kind: string(kind)}, nil
-		},
-	)
+	send, err := newSendMessageTool(config)
 	if err != nil {
 		return nil, err
 	}
@@ -175,6 +151,57 @@ func commonTools(config ToolConfig) ([]tool.BaseTool, error) {
 		return nil, err
 	}
 	return []tool.BaseTool{send, update}, nil
+}
+
+// newSendMessageTool 建立 Claude Code 风格的名称寻址边界，内部仍使用稳定 agent ID 落库。
+func newSendMessageTool(config ToolConfig) (tool.BaseTool, error) {
+	return toolutils.InferTool[sendMessageRequest, *sendMessageResponse](
+		SendMessageToolName,
+		"Send an explicit result or coordination message to a teammate by name. Normal assistant text is not visible to peers.",
+		func(ctx context.Context, req sendMessageRequest) (*sendMessageResponse, error) {
+			recipientName := strings.TrimSpace(req.To)
+			if recipientName == "" {
+				return nil, fmt.Errorf("recipient teammate name is required")
+			}
+			recipientID, err := resolveMemberAgentID(ctx, config.Store, config.TeamName, recipientName)
+			if err != nil {
+				return nil, err
+			}
+			payload, err := json.Marshal(TeammateMessage{
+				From:    AgentNameFromID(config.AgentID),
+				Summary: strings.TrimSpace(req.Summary),
+				Message: strings.TrimSpace(req.Message),
+			})
+			if err != nil {
+				return nil, err
+			}
+			msg, err := config.Store.EnqueueMessage(ctx, MailboxMessage{
+				TeamName:    config.TeamName,
+				FromAgent:   config.AgentID,
+				ToAgent:     recipientID,
+				Kind:        MessageKindNotification,
+				ContentJSON: string(payload),
+			})
+			if err != nil {
+				return nil, err
+			}
+			return &sendMessageResponse{MessageID: msg.ID, To: recipientName, Summary: strings.TrimSpace(req.Summary)}, nil
+		},
+	)
+}
+
+// resolveMemberAgentID 防止消息被投递到当前 team 中不存在的无人 mailbox。
+func resolveMemberAgentID(ctx context.Context, store *Store, teamName string, recipientName string) (string, error) {
+	members, err := store.ListMembers(ctx, teamName)
+	if err != nil {
+		return "", err
+	}
+	for _, member := range members {
+		if member.Name == recipientName {
+			return member.AgentID, nil
+		}
+	}
+	return "", fmt.Errorf("teammate %q is not registered in team %q", recipientName, teamName)
 }
 
 func newWebSearchTool(client SearchClient) (tool.BaseTool, error) {

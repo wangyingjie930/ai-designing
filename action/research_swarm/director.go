@@ -107,7 +107,16 @@ func NewLeaderTools(ctx context.Context, team *TeamRuntime) ([]tool.BaseTool, er
 	if err != nil {
 		return nil, err
 	}
-	return []tool.BaseTool{spawn}, nil
+	send, err := newSendMessageTool(ToolConfig{
+		Store:    team.Store,
+		TeamName: team.TeamName,
+		AgentID:  team.LeaderID,
+		Role:     RoleReportDirector,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return []tool.BaseTool{spawn, send}, nil
 }
 
 func leaderInstruction(team *TeamRuntime) string {
@@ -115,7 +124,8 @@ func leaderInstruction(team *TeamRuntime) string {
 		"你是调查报告 swarm 的 report_director。",
 		"当前 team_name 是 " + team.TeamName + "。",
 		"需要 teammate 时必须调用 spawn_teammate，不要假设 team 创建时已有固定成员。",
-		"不要主动轮询产物；leader 会把 teammate completion 事件作为下一轮输入交给你。",
+		"teammate 必须通过 send_message 显式汇报业务结果；idle_notification 只表示 teammate 当前可用，不能当作结果。",
+		"需要追问或补充分工时，调用 send_message 按 teammate 名称定向通信。",
 		"最终报告必须来自 teammate 写入 SQLite 的 report section。",
 	}, "\n")
 }
@@ -163,7 +173,7 @@ func (m *deterministicDirectorModel) Generate(_ context.Context, input []*schema
 			"description": string(RoleSearcher),
 			"prompt":      topic,
 		})), nil
-	case directorInput.Event != nil && directorInput.Event.AgentName == defaultSearchAgent && !m.spawnedAnalyst:
+	case directorInput.Message != nil && directorInput.Message.From == defaultSearchAgent && !m.spawnedAnalyst:
 		m.spawnedAnalyst = true
 		return toolCallMessage("call_spawn_analyst", SpawnTeammateToolName, toolArgs(map[string]any{
 			"name":        defaultAnalystAgent,
@@ -171,7 +181,7 @@ func (m *deterministicDirectorModel) Generate(_ context.Context, input []*schema
 			"description": string(RoleAnalyst),
 			"prompt":      topic,
 		})), nil
-	case directorInput.Event != nil && directorInput.Event.AgentName == defaultAnalystAgent && !m.spawnedWriter:
+	case directorInput.Message != nil && directorInput.Message.From == defaultAnalystAgent && !m.spawnedWriter:
 		m.spawnedWriter = true
 		return toolCallMessage("call_spawn_writer", SpawnTeammateToolName, toolArgs(map[string]any{
 			"name":        defaultWriterAgent,
@@ -179,10 +189,12 @@ func (m *deterministicDirectorModel) Generate(_ context.Context, input []*schema
 			"description": string(RoleWriter),
 			"prompt":      topic,
 		})), nil
-	case directorInput.Event != nil && directorInput.Event.AgentName == defaultWriterAgent:
+	case directorInput.Message != nil && directorInput.Message.From == defaultWriterAgent:
 		return schema.AssistantMessage("调查报告已完成。", nil), nil
+	case directorInput.Idle != nil:
+		return schema.AssistantMessage("已记录 teammate 空闲状态，等待显式结果消息或下一步任务。", nil), nil
 	default:
-		return schema.AssistantMessage("等待 teammate completion 事件。", nil), nil
+		return schema.AssistantMessage("等待 teammate 显式结果消息。", nil), nil
 	}
 }
 

@@ -344,7 +344,7 @@ func RunLeader(ctx context.Context, config LeaderConfig) (*LeaderResult, error) 
 	return result, nil
 }
 
-// runLeaderLifecycle 采用 Claude Code 风格的事件推进：director 每轮只响应 leader 输入或 teammate 完成事件。
+// runLeaderLifecycle 采用 Claude Code 风格的消息推进：业务结果与 teammate idle 生命周期分开处理。
 func runLeaderLifecycle(ctx context.Context, team *TeamRuntime, directorModel model.BaseChatModel) error {
 	if err := runLeaderAgent(ctx, team, directorModel, LeaderDirectorInput{
 		Type:     "start",
@@ -354,7 +354,7 @@ func runLeaderLifecycle(ctx context.Context, team *TeamRuntime, directorModel mo
 		return err
 	}
 	deadline := time.Now().Add(team.Timeout)
-	finalReportEventSeen := false
+	writerIdleTaskID := int64(0)
 	for {
 		messages, err := team.Store.ConsumeMessages(ctx, team.TeamName, team.LeaderID, 10)
 		if err != nil {
@@ -366,8 +366,8 @@ func runLeaderLifecycle(ctx context.Context, team *TeamRuntime, directorModel mo
 		}
 		for _, message := range messages {
 			input := leaderInputFromMailbox(team, message)
-			if input.Event != nil && input.Event.Artifact == "final_report" {
-				finalReportEventSeen = true
+			if input.Idle != nil && input.Idle.AgentName == defaultWriterAgent && input.Idle.CompletedStatus == "resolved" {
+				writerIdleTaskID = input.Idle.CompletedTaskID
 			}
 			if err := runLeaderAgent(ctx, team, directorModel, input); err != nil {
 				return err
@@ -377,8 +377,14 @@ func runLeaderLifecycle(ctx context.Context, team *TeamRuntime, directorModel mo
 		if err != nil {
 			return err
 		}
-		if done && finalReportEventSeen {
-			return nil
+		if done && writerIdleTaskID > 0 {
+			completed, err := isCompletedWriterTask(ctx, team.Store, team.TeamName, writerIdleTaskID)
+			if err != nil {
+				return err
+			}
+			if completed {
+				return nil
+			}
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timeout waiting for research swarm")
@@ -393,15 +399,37 @@ func runLeaderLifecycle(ctx context.Context, team *TeamRuntime, directorModel mo
 
 func leaderInputFromMailbox(team *TeamRuntime, message MailboxMessage) LeaderDirectorInput {
 	input := LeaderDirectorInput{
-		Type:     string(message.Kind),
+		Type:     "message",
 		TeamName: team.TeamName,
 		Topic:    team.Topic,
 	}
-	var event TaskCompletionEvent
-	if err := json.Unmarshal([]byte(message.ContentJSON), &event); err == nil && strings.TrimSpace(event.Type) != "" {
-		input.Event = &event
+	var idle IdleNotification
+	if err := json.Unmarshal([]byte(message.ContentJSON), &idle); err == nil && idle.Type == "idle_notification" {
+		if strings.TrimSpace(idle.AgentName) == "" {
+			idle.AgentName = AgentNameFromID(message.FromAgent)
+		}
+		input.Type = "idle_notification"
+		input.Idle = &idle
+		return input
 	}
+	var teammateMessage TeammateMessage
+	if err := json.Unmarshal([]byte(message.ContentJSON), &teammateMessage); err != nil || strings.TrimSpace(teammateMessage.Message) == "" {
+		teammateMessage.Message = message.ContentJSON
+	}
+	if strings.TrimSpace(teammateMessage.From) == "" {
+		teammateMessage.From = AgentNameFromID(message.FromAgent)
+	}
+	input.Message = &teammateMessage
 	return input
+}
+
+// isCompletedWriterTask 防止 final report 落库或 idle 单独出现时过早结束整个 team。
+func isCompletedWriterTask(ctx context.Context, store *Store, teamName string, taskID int64) (bool, error) {
+	task, err := store.GetTask(ctx, taskID)
+	if err != nil {
+		return false, fmt.Errorf("get writer task: %w", err)
+	}
+	return task.TeamName == teamName && task.Assignee == AgentID(defaultWriterAgent, teamName) && task.Status == TaskStatusCompleted, nil
 }
 
 func dispatchTask(ctx context.Context, store *Store, teamName string, leaderID string, agentName string, title string, topic string, prompt string) (int64, error) {
