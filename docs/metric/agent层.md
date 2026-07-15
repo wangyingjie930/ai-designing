@@ -1,112 +1,101 @@
-好。下面直接替换上一版的 7 张表；源码链接和其他说明保持不变，只新增“变量含义”列。
+# Agent 层指标
+
+> 口径基于当前 Claude Code 源码。只保留源码已有事件、消息字段，或能由它们稳定计算的指标；未实现的空模块、依赖人工评价的概念指标和语义不完整的指标已删除。
+>
+> 类型：`直` 表示直接对现有事件或字段聚合；`派` 表示由多个现有事件或字段计算。
 
 ## 1. Tool 指标
 
 | 指标 | 计算口径 | 变量含义 | 类型 |
 |---|---|---|---|
-| ★ Tool 调用量 | `count(tool_attempt)` | `tool_attempt`：模型发起的一次工具调用，包括成功、失败、取消和权限拒绝 | 直 |
-| ★ Tool 成功率 | `success_calls / tool_attempts` | `success_calls`：正常返回结果的次数；`tool_attempts`：所有调用尝试次数 | 派 |
-| Tool 执行错误率 | `execution_errors / executed_calls` | `execution_errors`：进入执行后发生错误的次数；`executed_calls`：真正进入 Tool 执行阶段的次数，不含权限拒绝 | 派 |
-| Schema 合法率 | `valid_input_calls / tool_attempts` | `valid_input_calls`：参数字段、类型、必填项均符合 Schema 的次数；`tool_attempts`：所有调用尝试 | 派 |
-| Unknown Tool Rate | `unknown_tool_calls / tool_attempts` | `unknown_tool_calls`：调用了不存在、未注册或未暴露 Tool 的次数 | 派 |
-| Tool 取消率 | `cancelled_calls / tool_attempts` | `cancelled_calls`：被用户或系统取消的调用次数；`tool_attempts`：所有调用尝试 | 派 |
-| ★ Tool P95 延迟 | `P95(duration_ms)` | `duration_ms`：一次 Tool 从开始执行到结束的毫秒数；P95 表示 95% 的调用不超过该耗时 | 直 |
-| 权限阻断率 | `rejected_calls / tool_attempts` | `rejected_calls`：权限检查未通过的次数；`tool_attempts`：所有调用尝试 | 派 |
-| Tool Result 大小 | `avg(tool_result_size_bytes)`、`P95(tool_result_size_bytes)` | `tool_result_size_bytes`：Tool 返回内容的字节数；`avg`：平均值；`P95`：第 95 百分位 | 直 |
-| 重复调用率 | `duplicate_calls / tool_attempts` | `duplicate_calls`：同一调用链中 Tool 名和主要参数相同的重复调用；`tool_attempts`：所有调用尝试 | 派 |
+| ★ 模型 Tool 调用量 | `count(assistant.content[type = 'tool_use'])` | 一次 `tool_use` 内容块代表模型发起的一次 Tool 调用；包含后续未进入实际执行的调用 | 直 |
+| Tool 实际执行量 | `count(OTel tool_result)` | `tool_result`：进入 `tool.call()` 后成功返回或抛出非 `AbortError` 的终态事件；不含 Schema 失败、权限拒绝和取消 | 直 |
+| ★ Tool 执行成功率 | `count(tool_result.success = 'true') / count(tool_result)` | `success`：实际执行终态；该口径只评价进入 `tool.call()` 的调用 | 派 |
+| Schema 校验失败率 | `count(tengu_tool_use_error.error = 'InputValidationError') / 模型 Tool 调用量` | `InputValidationError`：`tool.inputSchema.safeParse()` 未通过 | 派 |
+| Unknown Tool Rate | `count(tengu_tool_use_error.error starts_with 'No such tool available') / 模型 Tool 调用量` | 表示模型调用了当前可用 Tool 列表中不存在、且不能通过旧别名兼容的 Tool | 派 |
+| ★ Tool 执行 P95 延迟 | `P95(tool_result.duration_ms)` | `duration_ms`：从调用 `tool.call()` 前开始计时，到成功返回或非取消异常结束；不含权限等待和 PreToolUse Hook | 直 |
+| Tool Result 字符长度 | `avg(tengu_tool_use_success.toolResultSizeBytes)`、`P95(...)` | 字段名虽为 `toolResultSizeBytes`，源码实际使用 JavaScript 字符串 `.length`，因此这里按字符长度解释；只在成功事件上记录 | 直 |
 
 ## 2. 记忆指标
 
 | 指标 | 计算口径 | 变量含义 | 类型 |
 |---|---|---|---|
-| ★ Memory 提取成功率 | `successful_extractions / extraction_attempts` | `successful_extractions`：正常完成的记忆提取任务数；`extraction_attempts`：启动的提取任务总数 | 派 |
-| Memory 提取延迟 | `P95(extraction_finished_at - extraction_started_at)` | `extraction_started_at`：开始时间；`extraction_finished_at`：结束时间 | 直 |
-| Memory 保存产出率 | `memories_saved / message_count` | `memories_saved`：实际保存的记忆数量；`message_count`：本次提取处理的消息数 | 派 |
-| Memory 文件大小 | `content_length` 或 `memory_tokens` | `content_length`：记忆文件字符数；`memory_tokens`：记忆内容换算后的 Token 数 | 直 |
-| 记忆选择率 | `recall_with_result / recall_requests` | `recall_requests`：记忆召回执行次数；`recall_with_result`：至少选中一条记忆的召回次数 | 派 |
-| ★ Recall Prefetch P95 | `P95(settled_at - fired_at)` | `fired_at`：异步召回启动时间；`settled_at`：召回完成时间 | 直 |
-| Recall 消费率 | `consumed_prefetches / started_prefetches` | `started_prefetches`：启动的预取次数；`consumed_prefetches`：最终注入 Agent Context 的次数 | 派 |
-| 记忆陈旧率 | `stale_memories / retrieved_memories` | `stale_memories`：超过新鲜度阈值的记忆数；`retrieved_memories`：召回的记忆总数 | 派 |
-| ★ Recall Precision@K | `useful_memories_at_k / K` | `K`：返回的前 K 条记忆；`useful_memories_at_k`：其中真正帮助当前任务的记忆数 | 评 |
-| 记忆冲突/污染率 | `conflicting_memories / retrieved_memories` | `conflicting_memories`：与当前事实、代码、用户要求冲突的记忆数；`retrieved_memories`：召回总数 | 评 |
+| Memory 提取尝试量 | `count(tengu_extract_memories_extraction) + count(tengu_extract_memories_error)` | 两类事件分别表示提取流程正常结束和进入异常分支 | 派 |
+| ★ Memory 提取成功率 | `count(tengu_extract_memories_extraction) / Memory 提取尝试量` | 成功表示提取流程正常结束，不要求 `memories_saved > 0` | 派 |
+| Memory 提取 P95 延迟 | `P95(duration_ms)`，事件取成功与失败事件并集 | `duration_ms`：本次提取流程从启动到结束的耗时 | 直 |
+| Memory 保存产出率 | `sum(memories_saved) / sum(message_count)` | `memories_saved`：写入的主题记忆文件数，不含索引文件 `MEMORY.md`；`message_count`：本次处理的新消息数 | 派 |
+| MEMORY.md 字符长度 | `avg(tengu_memdir_loaded.content_length)`、`P95(...)` | `content_length` 只对应入口文件 `MEMORY.md`；源码通过字符串 `.length` 计算，字段不是 UTF-8 字节数 | 直 |
+| 记忆目录文件数 | `avg(tengu_memdir_loaded.total_file_count)` | `total_file_count`：入口文件所在记忆目录的直属文件数；目录读取失败时该字段缺失 | 直 |
+| Recall Prefetch 启动量 | `count(tengu_memdir_prefetch_collected)` | 每个已创建的 Prefetch handle 在释放时记录一次；未满足启动条件的请求不会产生该事件 | 直 |
+| ★ Recall Prefetch 生命周期 P95 | `P95(tengu_memdir_prefetch_collected.latency_ms)` | 已完成时为启动到完成耗时；尚未完成或被取消时为启动到 handle 释放的生命周期，不统一等于召回延迟 | 直 |
+| Recall 到达消费点率 | `count(consumed_on_iteration >= 0) / Recall Prefetch 启动量` | `consumed_on_iteration >= 0` 只表示查询循环到达消费点，不保证召回结果非空或真正注入了记忆 | 派 |
+| 首轮消费前完成率 | `count(hidden_by_first_iteration = true) / Recall Prefetch 启动量` | 该字段为真等价于 Prefetch 已完成且 `consumed_on_iteration = 0` | 派 |
 
 ## 3. 压缩指标
 
 | 指标 | 计算口径 | 变量含义 | 类型 |
 |---|---|---|---|
-| Compaction 次数 | `count(compaction_attempt)` | `compaction_attempt`：一次上下文压缩尝试 | 直 |
-| ★ Compaction 成功率 | `successful_compactions / compaction_attempts` | `successful_compactions`：成功生成摘要并替换上下文的次数；`compaction_attempts`：所有压缩尝试 | 派 |
-| Compaction 失败率 | `failed_compactions / compaction_attempts` | `failed_compactions`：压缩失败次数；`compaction_attempts`：所有压缩尝试 | 派 |
-| ★ Token 压缩率 | `(pre_tokens - post_tokens) / pre_tokens` | `pre_tokens`：压缩前 Token 数；`post_tokens`：压缩后真正保留的 Token 数，对应 `truePostCompactTokenCount` | 派 |
-| Message 压缩率 | `(original_messages - compacted_messages) / original_messages` | `original_messages`：压缩前消息数；`compacted_messages`：压缩后摘要、附件等消息数 | 派 |
-| 净节省 Token | `pre_tokens - post_tokens - overhead_tokens` | `pre_tokens`：压缩前 Token；`post_tokens`：压缩后 Token；`overhead_tokens`：生成摘要额外消耗的 Token | 派 |
-| 压缩成本 | `input_tokens × 输入价 + output_tokens × 输出价 + cache_tokens × 缓存价` | `input_tokens`：摘要模型读取量；`output_tokens`：摘要生成量；`cache_tokens`：缓存读取或创建量 | 直 |
-| Next-turn 重触发率 | `retrigger_count / successful_compactions` | `retrigger_count`：压缩后仍超过阈值、下轮需要再压缩的次数；`successful_compactions`：成功压缩次数 | 直 |
-| 重压缩间隔 | `avg(turns_since_previous_compact)` | `turns_since_previous_compact`：距离上一次压缩经过的 Agent 轮数 | 直 |
-| ★ 关键信息保留率 | `preserved_critical_facts / original_critical_facts` | `original_critical_facts`：压缩前的关键要求、ID、状态等；`preserved_critical_facts`：压缩后仍准确保留的数量 | 评 |
+| 自动压缩成功量 | `count(tengu_auto_compact_succeeded)` | 自动压缩成功后记录；同一次 Full Compaction 还会产生 `tengu_compact`，两者不能相加当作尝试量 | 直 |
+| Full Compaction 成功量 | `count(tengu_compact)` | 完整上下文压缩成功事件，包含自动压缩和手动完整压缩 | 直 |
+| Partial Compaction 成功量 | `count(tengu_partial_compact)` | 消息选择器触发的局部压缩成功事件 | 直 |
+| 已记录 Compaction 失败量 | `count(tengu_compact_failed) + count(tengu_partial_compact_failed)` | 只覆盖源码明确记录的失败分支，不能视为所有压缩尝试的完整失败数 | 派 |
+| ★ 消息载荷 Token 压缩率 | `avg((preCompactTokenCount - truePostCompactTokenCount) / preCompactTokenCount)`，事件取 `tengu_compact` | `truePostCompactTokenCount` 是压缩后消息载荷的粗略估算，不含完整 System Prompt、Tools 和 User Context | 派 |
+| Compaction API Token | `avg(compactionInputTokens)`、`avg(compactionOutputTokens)`、`avg(compactionCacheReadTokens)`、`avg(compactionCacheCreationTokens)` | 这些字段是生成压缩摘要这次 API 调用的用量，不是压缩后上下文大小 | 直 |
+| Payload 超阈值预测率 | `count(tengu_compact.willRetriggerNextTurn = true) / count(tengu_compact)` | 表示压缩后的消息载荷估算已超过自动压缩阈值；`false` 也可能因附加 System Prompt 等内容在下轮再次触发 | 派 |
+| 重压缩迭代间隔 | `avg(turnsSincePreviousCompact)`，仅统计 `turnsSincePreviousCompact >= 0` | 表示距上次压缩经过的 Agent 查询循环迭代数，不是用户对话轮数或 API 请求次数 | 直 |
 
 ## 4. ReAct 指标
 
 | 指标 | 计算口径 | 变量含义 | 类型 |
 |---|---|---|---|
-| ★ 平均 API 轮次 | `sum(num_turns) / task_count` | `num_turns`：每个任务的模型调用轮数；`task_count`：任务总数 | 直 |
-| 多轮继续率 | `multi_turn_tasks / task_count` | `multi_turn_tasks`：`num_turns > 1` 的任务数；`task_count`：任务总数 | 派 |
-| 每轮 Action 数 | `tool_use_count / num_turns` | `tool_use_count`：任务中的 Tool 调用数；`num_turns`：模型调用轮数 | 派 |
-| Observation 利用率 | `used_tool_results / available_tool_results` | `available_tool_results`：Tool 返回结果数；`used_tool_results`：后续决策或最终答案真正使用的结果数 | 评 |
-| 重复 Action 率 | `repeated_actions / all_actions` | `repeated_actions`：Tool 名和主要参数重复的 Action 数；`all_actions`：所有 Tool Action 数 | 派 |
-| 无进展循环率 | `no_progress_tasks / multi_turn_tasks` | `no_progress_tasks`：多轮执行却没有新增证据或状态变化的任务数；`multi_turn_tasks`：多轮任务数 | 评 |
-| 错误恢复率 | `recovered_tasks / tasks_with_tool_error` | `tasks_with_tool_error`：发生过 Tool Error 的任务；`recovered_tasks`：出错后最终仍成功的任务 | 派 |
-| Max-turn 触顶率 | `max_turn_tasks / task_count` | `max_turn_tasks`：因达到最大轮数被迫停止的任务；`task_count`：任务总数 | 直 |
-| 过早停止率 | `premature_tasks / reported_completed_tasks` | `reported_completed_tasks`：Agent 报告完成的任务；`premature_tasks`：实际仍有要求未完成的任务 | 评 |
-| ★ 任务完成率 | `successful_tasks / task_count` | `successful_tasks`：通过用户要求或验收标准的任务；`task_count`：任务总数 | 评 |
-| 单成功任务成本 | `total_cost / successful_tasks` | `total_cost`：所有任务的模型和工具总成本；`successful_tasks`：成功任务数 | 派 |
+| ★ API 请求尝试量 | `count(tengu_api_success) + count(tengu_api_error)`，按目标 `querySource` 过滤 | 一次事件对应一次 API 请求尝试；必须用 `querySource` 区分主循环、Side Query、Compaction、Subagent 等来源 | 派 |
+| API 请求成功率 | `count(tengu_api_success) / API 请求尝试量`，保持相同 `querySource` 过滤 | 只表示 API 请求是否正常完成，不表示用户任务完成 | 派 |
+| 每次成功 API 响应的 Tool Action 数 | `模型 Tool 调用量 / count(tengu_api_success)`，保持相同查询范围 | 衡量成功模型响应平均产生多少个 `tool_use`；不能使用 `QueryEngine.turnCount` 代替 API 请求数 | 派 |
+| SDK 技术成功率 | `count(result.subtype = 'success') / count(result)` | `result`：一次 SDK 查询的最终结果消息；技术成功不等于用户验收成功 | 派 |
+| Max-turn 触顶率 | `count(result.subtype = 'error_max_turns') / count(result)` | 表示 SDK 查询因达到最大查询循环迭代数而结束 | 派 |
+| Tool 错误后技术恢复率 | `count(存在 tool_result.is_error 且最终 result.subtype = 'success' 的 SDK 查询) / count(存在 tool_result.is_error 的 SDK 查询)` | 表示出现 Tool 错误后查询仍以 SDK 技术成功结束，不评价答案质量 | 派 |
+| 单次 SDK 技术成功成本 | `sum(成功 SDK 查询内 tengu_api_success.costUSD) / 成功 SDK 查询数` | `costUSD` 是模型 API 成本；不包含外部 Tool 自身费用，且不能直接累加 SDK result 的累计 `total_cost_usd` | 派 |
 
 ## 5. Skill 指标
 
 | 指标 | 计算口径 | 变量含义 | 类型 |
 |---|---|---|---|
-| Skill 可用数量 | `sum(skills_loaded_per_session) / session_count` | `skills_loaded_per_session`：每个 Session 加载的 Skill 数；`session_count`：Session 总数 | 直 |
-| Skill Budget 占用 | `skill_listing_tokens / context_budget_tokens` | `skill_listing_tokens`：Skill 名称和描述占用的 Token；`context_budget_tokens`：为 Skill 列表预留的预算 | 直 |
-| ★ Skill 调用率 | `tasks_invoking_skill / eligible_tasks` | `eligible_tasks`：本应该使用 Skill 的任务；`tasks_invoking_skill`：实际调用 Skill 的任务 | 派 |
-| 调用来源分布 | `invocations_from_source / all_skill_invocations` | `invocations_from_source`：来自用户、Claude 主动调用或嵌套调用的次数；`all_skill_invocations`：Skill 调用总数 | 直 |
-| 执行模式分布 | `mode_invocations / all_skill_invocations` | `mode_invocations`：inline、fork 或 remote 模式的调用次数；`all_skill_invocations`：Skill 调用总数 | 直 |
-| ★ Discovery→Invocation 转化率 | `discovered_and_invoked / discovered_skills` | `discovered_skills`：动态发现的 Skill 数；`discovered_and_invoked`：发现后又被真正调用的数量 | 派 |
-| Skill 参数校验失败率 | `validation_failed / invocation_attempts` | `validation_failed`：不存在、禁用、类型不正确等校验失败次数；`invocation_attempts`：Skill 调用尝试总数 | 派 |
-| Remote Skill 缓存命中率 | `remote_cache_hits / remote_skill_loads` | `remote_cache_hits`：从缓存加载的次数；`remote_skill_loads`：Remote Skill 加载总数 | 直 |
-| Remote Skill 加载 P95 | `P95(remote_load_latency_ms)` | `remote_load_latency_ms`：一次 Remote Skill 加载所需的毫秒数 | 直 |
-| Skill 执行成功率 | `successful_invocations / valid_invocations` | `valid_invocations`：通过校验并开始执行的调用；`successful_invocations`：正常执行完成的调用 | 派 |
-| ★ Skill 指令遵循率 | `passed_constraints / all_constraints` | `all_constraints`：Skill 中需要遵守的关键约束数；`passed_constraints`：实际遵守的数量 | 评 |
-| Skill Success Lift | `success_rate_with_skill - success_rate_without_skill` | `success_rate_with_skill`：使用 Skill 的任务成功率；`success_rate_without_skill`：不使用 Skill 的对照组成功率 | 评 |
+| Session 启动 Skill 可用数量 | `count(tengu_skill_loaded)`，按 Session 分组 | 每个 Session 启动时，每个可用的 Prompt Skill 记录一次；不包含非 Prompt 类型命令 | 直 |
+| Skill Listing 字符预算 | `max(tengu_skill_loaded.skill_budget)`，按 Session 分组 | 同一 Session 的各 Skill 事件重复携带同一预算；源码按上下文窗口的 1% Token 再乘 4 字符估算，字段本身是字符预算 | 直 |
+| ★ 模型 Skill 调用量 | `count(tengu_skill_tool_invocation)` | 模型通过 Skill Tool 调用本地 Skill 时记录；当前可用本地执行路径为 `inline` 和 `fork` | 直 |
+| Skill 执行模式分布 | `count(execution_context = mode) / 模型 Skill 调用量` | `execution_context`：当前外部构建可达的值为 `inline` 或 `fork`；Remote Skill 依赖的模块在当前源码快照中为空实现，不纳入指标 | 派 |
+| Skill 嵌套调用占比 | `count(invocation_trigger = 'nested-skill') / 模型 Skill 调用量` | `nested-skill` 表示 Skill 在更深层查询上下文中触发；顶层模型主动调用为 `claude-proactive` | 派 |
+| Skill Tool 技术成功率 | `count(tengu_tool_use_success.toolName = 'Skill') / count(tengu_tool_use_success/error.toolName = 'Skill')` | 只衡量 Skill Tool 是否正常处理完成；不衡量 Skill 指令遵循、适用性或任务收益；取消不进入分母 | 派 |
 
 ## 6. 权限指标
 
 | 指标 | 计算口径 | 变量含义 | 类型 |
 |---|---|---|---|
-| Permission 决策量 | `count(permission_decision)` | `permission_decision`：一次 allow、reject 或 ask 权限判断 | 直 |
-| ★ Permission Prompt Rate | `prompted_calls / permission_checked_calls` | `prompted_calls`：弹出用户确认的调用数；`permission_checked_calls`：经过权限判断的调用总数 | 派 |
-| 权限通过率 | `accept_decisions / all_decisions` | `accept_decisions`：允许执行的决策数；`all_decisions`：允许和拒绝决策总数 | 派 |
-| 权限拒绝率 | `reject_decisions / all_decisions` | `reject_decisions`：拒绝执行的决策数；`all_decisions`：所有终态决策 | 派 |
-| ★ 用户等待 P95 | `P95(permission_decision_at - prompt_started_at)` | `prompt_started_at`：权限弹窗出现时间；`permission_decision_at`：用户完成选择的时间 | 直 |
-| 决策来源分布 | `decisions_from_source / all_decisions` | `source`：config、classifier、hook、临时允许、永久允许、用户拒绝等决策来源 | 直 |
-| 永久授权率 | `permanent_accepts / user_accepts` | `permanent_accepts`：用户选择永久允许的次数；`user_accepts`：用户手动允许的总次数 | 派 |
-| Hook 干预率 | `hook_decisions / all_decisions` | `hook_decisions`：由 Permission Hook 决定允许或拒绝的次数；`all_decisions`：所有权限决策 | 派 |
-| Classifier 决策率 | `classifier_decisions / all_decisions` | `classifier_decisions`：由权限分类器自动判断的次数；它只反映使用量，不代表判断正确 | 派 |
-| 连续拒绝降级率 | `fallback_prompts / automatic_denial_sequences` | `automatic_denial_sequences`：连续自动拒绝的调用序列；`fallback_prompts`：达到阈值后改为询问用户的次数 | 派 |
-| ★ 权限导致任务终止率 | `permission_failed_tasks / tasks_with_permission_checks` | `permission_failed_tasks`：因必要 Tool 被拒绝而失败的任务；`tasks_with_permission_checks`：发生过权限检查的任务 | 派 |
+| Permission 终态决策量 | `count(OTel tool_decision)` | 每个事件都是最终 `accept` 或 `reject`；`ask` 是中间行为，不是该事件的终态值 | 直 |
+| ★ Permission Prompt Rate | `count(权限分析事件包含 waiting_for_user_permission_ms) / count(权限分析终态事件)` | 等待字段只在真正向用户展示确认并得到终态决定时记录；自动允许或拒绝不带该字段 | 派 |
+| 权限通过率 | `count(tool_decision.decision = 'accept') / Permission 终态决策量` | `accept`：最终允许执行 | 派 |
+| 权限拒绝率 | `count(tool_decision.decision = 'reject') / Permission 终态决策量` | `reject`：最终拒绝执行 | 派 |
+| ★ 用户等待 P95 | `P95(waiting_for_user_permission_ms)` | 从权限提示开始到用户完成选择的耗时；只统计实际弹出提示的决策 | 直 |
+| 决策来源分布 | `count(tool_decision.source = source) / Permission 终态决策量` | `source` 可包括 `config`、`classifier`、`hook`、`user_temporary`、`user_permanent`、`user_abort`、`user_reject` 等 | 派 |
+| 永久授权率 | `count(tengu_tool_use_granted_in_prompt_permanent) / count(tengu_tool_use_granted_in_prompt_permanent + tengu_tool_use_granted_in_prompt_temporary)` | 只比较用户在权限提示中选择的永久允许和临时允许，不混入配置、Hook 或 Classifier 自动允许 | 派 |
+| Hook 决策率 | `count(tool_decision.source = 'hook') / Permission 终态决策量` | 表示最终决定来自 Permission Hook 的比例 | 派 |
+| Classifier 决策率 | `count(tool_decision.source = 'classifier') / Permission 终态决策量` | 表示最终决定来自权限分类器的比例，不代表分类正确率 | 派 |
+| 自动拒绝阈值触发量 | `count(tengu_auto_mode_denial_limit_exceeded)` | 自动模式累计或连续拒绝达到阈值时记录 | 直 |
+| CLI 降级询问占比 | `count(tengu_auto_mode_denial_limit_exceeded.mode = 'cli') / count(tengu_auto_mode_denial_limit_exceeded)` | `cli` 路径在触发后降级为询问用户；`headless` 路径直接抛出 `AbortError` | 派 |
 
 ## 7. Subagent 指标
 
 | 指标 | 计算口径 | 变量含义 | 类型 |
 |---|---|---|---|
-| Subagent 启动量 | `count(subagent_started)` | `subagent_started`：一个 Subagent 真正开始运行；可按类型、模型、同步/异步拆分 | 直 |
-| ★ Subagent 完成率 | `completed_subagents / started_subagents` | `completed_subagents`：正常完成并返回结果的数量；`started_subagents`：启动总数 | 派 |
-| Subagent 终止率 | `terminated_subagents / started_subagents` | `terminated_subagents`：因取消、超时或错误终止的数量；`started_subagents`：启动总数 | 派 |
-| ★ Subagent P95 延迟 | `P95(finished_at - started_at)` | `started_at`：开始时间；`finished_at`：完成或终止时间 | 直 |
-| Subagent Token | `sum(total_tokens) / completed_subagents` | `total_tokens`：每个 Subagent 消耗的 Token；`completed_subagents`：正常完成数量 | 直 |
-| Subagent Tool 数 | `sum(total_tool_uses) / completed_subagents` | `total_tool_uses`：Subagent 内部 Tool 调用次数；`completed_subagents`：正常完成数量 | 直 |
-| 消息/输出规模 | `sum(response_char_count) / completed_subagents` | `response_char_count`：Subagent 最终输出字符数；也可用 `assistant_message_count` 统计消息量 | 直 |
-| Async 占比 | `async_subagents / started_subagents` | `async_subagents`：后台异步运行的 Subagent；`started_subagents`：全部启动数量 | 直 |
-| Fork 占比 | `fork_subagents / started_subagents` | `fork_subagents`：继承父 Agent 上下文的 Fork Agent；`started_subagents`：全部启动数量 | 直 |
-| Resume Rate | `resume_invocations / all_subagent_invocations` | `resume_invocations`：继续已有 Subagent 的次数；`all_subagent_invocations`：新建和继续调用总数 | 直 |
-| 后台化比例 | `foreground_to_background / foreground_started` | `foreground_started`：最初以前台方式运行的数量；`foreground_to_background`：执行中转入后台的数量 | 派 |
-| ★ 委派收益 | `success_rate_with_subagent - success_rate_without_subagent` | `success_rate_with_subagent`：使用 Subagent 的成功率；`success_rate_without_subagent`：不使用 Subagent 的对照组成功率 | 评 |
+| Subagent 选择量 | `count(tengu_agent_tool_selected)` | Agent 定义和模型已选定后、真正运行前记录；它是启动尝试量，不能严格解释为已经开始运行 | 直 |
+| Subagent 完成事件量 | `count(tengu_agent_tool_completed)` | Subagent 正常生成可返回结果后记录 | 直 |
+| ★ 完成事件覆盖率 | `count(tengu_agent_tool_completed) / count(tengu_agent_tool_selected)` | 表示选择事件中有完成事件的比例；部分非取消异常没有统一终态事件，因此不能直接命名为真实完成率 | 派 |
+| 已记录终止率 | `count(tengu_agent_tool_terminated) / count(tengu_agent_tool_selected)` | 终止事件主要覆盖用户取消、`AbortError`、后台任务终止和部分合成终止路径，不覆盖所有运行错误 | 派 |
+| ★ Subagent 终态 P95 延迟 | `P95(duration_ms)`，事件取 `tengu_agent_tool_completed` 与 `tengu_agent_tool_terminated` 并集 | `duration_ms`：从 Subagent 运行起点到正常完成或已记录终止的耗时 | 直 |
+| 完成时上下文 Token | `avg(tengu_agent_tool_completed.total_tokens)` | `total_tokens` 来自最后一条 Assistant 消息的 usage，表示最终 API 上下文用量，不是整个 Subagent 的累计 Token 消耗 | 直 |
+| Subagent Tool 数 | `avg(tengu_agent_tool_completed.total_tool_uses)` | `total_tool_uses`：Subagent 消息中出现的 Tool Use 总数 | 直 |
+| 最终文本块数量 | `avg(tengu_agent_tool_completed.response_char_count)` | 字段名虽叫 `response_char_count`，源码实际赋值为最终文本内容块数组的 `.length`，因此这里按文本块数量解释 | 直 |
+| Agent 消息数量 | `avg(tengu_agent_tool_completed.assistant_message_count)` | 字段名虽叫 `assistant_message_count`，源码实际使用 `agentMessages.length`，包含 Subagent 消息数组中的所有消息类型 | 直 |
+| Async 选择占比 | `count(tengu_agent_tool_selected.is_async = true) / count(tengu_agent_tool_selected)` | `is_async`：选择时已确定在后台异步运行 | 派 |
+| Fork 选择占比 | `count(tengu_agent_tool_selected.is_fork = true) / count(tengu_agent_tool_selected)` | `is_fork`：选择时走继承父上下文的 Fork 路径 | 派 |
+| Resume 调用占比 | `count(API 事件 invocationKind = 'resume') / count(API 事件 invocationKind in ['spawn', 'resume'])` | `invocationKind` 只稀疏记录在每次 spawn/resume 边界的第一条 `tengu_api_success/error` 上，需限定 `invokingRequestId` 非空 | 派 |
