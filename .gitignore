@@ -53,3 +53,4 @@ output
 
 # Local isolated worktrees
 .worktrees/
+.superpowers
